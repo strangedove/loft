@@ -63,6 +63,9 @@ quality = [
     "pyrefly",
     "pre-commit",
 ]
+eval = [
+    "vllm>=0.8.0"
+]
 quantization = [
     "bitsandbytes"
 ]
@@ -73,6 +76,7 @@ dev = [
     "pre-commit",
     "bitsandbytes",
     "parameterized",
+    "vllm>=0.8.0",
 ]
 
 [tool.hatch.metadata]

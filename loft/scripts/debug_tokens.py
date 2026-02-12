@@ -15,8 +15,8 @@
 """
 Tokenization debug inspector.
 
-Shows exactly how samples get processed end-to-end:
-  raw data -> preprocessed -> chat template applied -> tokenized -> loss mask
+Shows the final tokenized form with loss mask coloring so you can verify
+turn boundaries and which tokens the model trains on.
 
 Usage:
     loft prepare configs/my-training.yaml --debug
@@ -205,21 +205,22 @@ def _format_token_view(
     input_ids: list[int],
     loss_mask: list[int],
     tokenizer,
-    max_display_tokens: int = 200,
+    max_display_tokens: int = 500,
 ) -> str:
     """
     Format a token-level view with color coding.
 
-    Shows each token with its type:
+    Shows each token classified by loss mask:
     - [TRAIN] tokens: green - model learns from these
     - [MASKED] tokens: dim - not trained on (prompt, system message)
-    - Special tokens are highlighted
+
+    Special tokens are classified as TRAIN or MASKED based on the loss mask
+    (not given their own category), so it's immediately clear whether they
+    are trained on. They are visually marked with angle brackets in the
+    decoded text.
     """
     lines = []
     num_tokens = len(input_ids)
-    special_ids = set()
-    if hasattr(tokenizer, "all_special_ids"):
-        special_ids = set(tokenizer.all_special_ids)
 
     # If too many tokens, show first N and last N
     show_start = max_display_tokens // 2
@@ -245,9 +246,6 @@ def _format_token_view(
         if current_type == "TRAIN":
             tag = _label("TRAIN", (_GREEN, _BOLD))
             text_display = _c(repr(decoded), _GREEN)
-        elif current_type == "SPECIAL":
-            tag = _label("SPECIAL", (_MAGENTA, _BOLD))
-            text_display = _c(repr(decoded), _MAGENTA)
         else:  # MASKED
             tag = _label("MASKED", (_DIM,))
             text_display = _c(repr(decoded), _DIM)
@@ -265,12 +263,9 @@ def _format_token_view(
 
         token_id = input_ids[idx]
         is_trained = loss_mask[idx] if idx < len(loss_mask) else 0
-        is_special = token_id in special_ids
         decoded_token = tokenizer.decode([token_id])
 
-        if is_special:
-            token_type = "SPECIAL"
-        elif is_trained:
+        if is_trained:
             token_type = "TRAIN"
         else:
             token_type = "MASKED"
@@ -302,12 +297,13 @@ def debug_sample(
     train_on_incomplete_assistant: bool = False,
     max_length: Optional[int] = None,
     truncation_strategy: str = "truncate",
-    max_display_tokens: int = 200,
+    max_display_tokens: int = 500,
 ) -> str:
     """
-    Produce a full debug report for a single sample.
+    Produce a debug report for a single sample.
 
-    Shows: raw → preprocessed → templated → tokenized → loss mask.
+    Shows the final tokenized form with loss mask coloring so you can verify
+    turn boundaries and which tokens the model trains on.
     """
     lines = []
     warnings = []
@@ -318,87 +314,26 @@ def debug_sample(
     lines.append(_c(f"  Dataset: {dataset_label}", _BOLD))
     lines.append(_c(f"{'═' * 72}", _BOLD))
 
-    # 1. Raw input
-    lines.append("")
-    lines.append(_c("  ① Raw input", _BOLD, _CYAN))
-    lines.append(f"  {sep}")
+    # Preprocess (same steps as preprocess_dataset, but silently)
     is_chat = is_conversational(sample) or is_conversational_from_value(sample)
-    lines.append(f"  Format: {'chat/conversational' if is_chat else 'plain text'}")
-    lines.append(f"  Columns: {list(sample.keys())}")
-    lines.append("")
-    lines.append(_format_raw_sample(sample))
-
-    # 2. Preprocess (simulate the same steps as preprocess_dataset)
-    lines.append("")
-    lines.append(_c("  ② After preprocessing", _BOLD, _CYAN))
-    lines.append(f"  {sep}")
-
     processed = dict(sample)
-    preprocess_notes = []
 
-    # Convert legacy format
     if is_conversational_from_value(processed) and "conversations" in processed:
         processed = maybe_convert_to_chatml(processed)
         if "conversations" in processed:
             del processed["conversations"]
-        preprocess_notes.append("Converted legacy format → ChatML")
 
-    # Add system message
     if (default_system_message or "_system_message" in processed) and is_conversational(processed):
         processed = add_system_message_to_example(
             processed, system_message=default_system_message or ""
         )
-        preprocess_notes.append(f"Added system message: {(default_system_message or '')[:80]}...")
 
-    # Fix turn order
     if fix_turn_order and is_conversational(processed):
         processed = fix_example_turn_order(processed, filler_message=fix_turn_order_filler)
-        preprocess_notes.append("Fixed turn order")
 
-    if preprocess_notes:
-        for note in preprocess_notes:
-            lines.append(f"  • {note}")
-        lines.append("")
-    else:
-        lines.append("  (no changes)")
-        lines.append("")
-
-    lines.append(_format_raw_sample(processed))
-
-    # 3. Chat template / text
+    # Tokenize
     lines.append("")
-    lines.append(_c("  ③ After chat template / formatting", _BOLD, _CYAN))
-    lines.append(f"  {sep}")
-
-    if is_conversational(processed):
-        messages = processed.get("messages", [])
-        try:
-            formatted_text = tokenizer.apply_chat_template(messages, tokenize=False)
-            lines.append(f"  {_truncate_text(formatted_text, 800)}")
-        except Exception as e:
-            formatted_text = None
-            lines.append(f"  {_c(f'ERROR applying chat template: {e}', _RED)}")
-            warnings.append(f"Chat template failed: {e}")
-    else:
-        text = processed.get(dataset_text_field, "")
-        if not text:
-            available = [k for k in processed.keys() if not k.startswith("_")]
-            warnings.append(f"Text field '{dataset_text_field}' is empty. Available: {available}")
-            empty_msg = f'(empty — field "{dataset_text_field}" not found)'
-            lines.append(f"  {_c(empty_msg, _RED)}")
-        else:
-            # Show with EOS that will be added
-            eos = tokenizer.eos_token or ""
-            if eos and not text.endswith(eos):
-                display_text = text + _c(eos, _MAGENTA)
-                lines.append(f"  {_truncate_text(text, 700)}{_c(eos, _MAGENTA)} (EOS added)")
-            else:
-                lines.append(f"  {_truncate_text(text, 800)}")
-        formatted_text = text
-
-    # 4. Tokenize
-    lines.append("")
-    lines.append(_c("  ④ Tokenized (token-level view)", _BOLD, _CYAN))
+    lines.append(_c("  Tokenized (loss mask view)", _BOLD, _CYAN))
     lines.append(f"  {sep}")
 
     # Add EOS for plain text (matching prepare pipeline behavior)
@@ -472,7 +407,7 @@ def debug_sample(
     return "\n".join(lines)
 
 
-def run_debug(training_config: dict, max_display_tokens: int = 200, config_path: Optional[str] = None) -> None:
+def run_debug(training_config: dict, max_display_tokens: int = 500, config_path: Optional[str] = None) -> None:
     """
     Run the debug inspector on one sample from each dataset.
 
@@ -595,8 +530,8 @@ def main():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=200,
-        help="Max tokens to display in token-level view (default: 200)",
+        default=500,
+        help="Max tokens to display in token-level view (default: 500)",
     )
 
     args = parser.parse_args()

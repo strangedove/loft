@@ -1,0 +1,258 @@
+== LOFT FEATURE IDEAS & IMPROVEMENT NOTES ==
+Last updated: 2026-02-12
+
+
+== PREPARE PIPELINE IMPROVEMENTS ==
+
+1. Type hints and docstring cleanup
+   - prepare.py functions have type hints but some internal helpers don't
+   - data_utils.py tokenization functions could use clearer docstrings
+   - Consider adding py.typed marker for downstream type checking
+
+
+== USER FEATURE IDEAS ==
+
+1. Save and quit
+   - A way to gracefully stop a training run mid-epoch and save the current
+     state (optimizer, scheduler, model weights) so it can be resumed later
+   - HuggingFace Trainer already supports resume_from_checkpoint, but there's
+     no clean way to signal "save now and stop" from outside the process
+   - Options:
+     a) Signal handler (SIGUSR1 or similar) that triggers save + exit
+     b) File-based trigger: trainer checks for a "stop" sentinel file each step
+     c) Keyboard shortcut during training that saves and exits cleanly
+   - Need to handle DeepSpeed state consolidation (ZeRO-3 shards must be
+     gathered before saving)
+
+2. Automatic / smart sequence length and batch size calculations
+   - Analyze the dataset to determine optimal max_length (e.g., 95th percentile
+     of token lengths, or find the knee in the distribution)
+   - Auto-calculate batch size that fits in available VRAM
+   - Could use a small calibration run (1-2 steps) to find max batch size
+     via binary search, similar to PyTorch Lightning's auto_scale_batch_size
+   - Related: show histogram of sequence lengths during prepare so user can
+     make informed choices about max_length and truncation_strategy
+
+3. Automatic VRAM usage estimation
+   - Given a training config (model size, batch size, max_length, LoRA rank,
+     optimizer, DeepSpeed stage, gradient checkpointing, etc.), estimate
+     peak VRAM usage BEFORE starting the run
+   - Formula-based: model params * bytes_per_param + optimizer states +
+     activations + gradient buffers + KV cache
+   - Could output a report like:
+       Model weights:        ~3.2 GB
+       LoRA trainable:       ~0.1 GB
+       Optimizer states:     ~0.4 GB (AdamW, 2x trainable)
+       Activations (est):    ~8.0 GB (batch=2, seq=4096, grad_ckpt=on)
+       DeepSpeed overhead:   ~1.5 GB
+       Total estimated:      ~13.2 GB per GPU
+       Recommended GPU:      24 GB (e.g., RTX 4090, A5000)
+   - Would save money on cloud GPU rentals by right-sizing
+
+4. Training parameter sweeping and ablation
+   - Define a sweep config with ranges for learning_rate, lora_r, lora_alpha,
+     warmup_ratio, weight_decay, etc.
+   - Run multiple short training runs (e.g., 50-100 steps each) and compare
+     loss curves
+   - Efficiency ideas:
+     a) Load model once, run multiple configs sequentially without reloading
+     b) Use W&B sweeps integration (already have W&B tracking)
+     c) Bayesian optimization for hyperparameter search
+     d) Early stopping for obviously bad configs
+   - Simple version: just a loop over configs with shared model loading
+   - Advanced: LoRA hot-swapping (train multiple LoRA adapters on same base
+     model without reloading base weights)
+
+5. Smart EOS handling for mixed complete/incomplete responses
+   - Current state: train_on_incomplete_assistant flag is all-or-nothing
+   - Problem: in a dataset, some samples may have been truncated (no natural
+     ending) while others are complete (should train on EOS)
+   - Need per-sample EOS handling, not just a global flag
+   - Options:
+     a) Metadata column: add a "_complete" boolean column to the dataset
+        during prepare, based on whether the original text ended naturally
+        or was truncated by the split strategy
+     b) Heuristic: if the last token before truncation is a natural
+        sentence-ending token (period, EOS, etc.), treat as complete
+     c) Prepare-time flag: when split strategy produces chunks, mark all
+        chunks except the last one as "incomplete", last chunk as "complete"
+   - The prepare pipeline already knows which samples were split (it does the
+     chunking), so it could add this metadata automatically
+
+6. Prepare caching / incremental re-prepare
+   - If you add a new dataset to a data config, re-preparing currently
+     reprocesses everything from scratch
+   - Could cache per-dataset tokenized results and only re-tokenize changed
+     datasets, then re-combine
+   - The config_hash in blend_metadata.json is a start, but it hashes the
+     whole config, not individual datasets
+
+7. Training progress dashboard
+   - A simple local web UI (or terminal UI) showing live training metrics
+   - Loss curve, learning rate schedule, ETA, GPU utilization, VRAM usage
+   - W&B does this but requires internet; a local option would be useful
+     for offline training or quick iteration
+   - Could use something like textual (terminal) or gradio (web)
+
+8. Model merge / adapter stacking utilities
+   - After training multiple LoRA adapters, tools to merge them or stack them
+   - `loft merge --base model --adapters lora1 lora2 --weights 0.7 0.3`
+   - Could also support TIES, DARE, or other merge strategies
+
+9. Dataset quality analysis
+   - Pre-prepare analysis of dataset quality: duplicate detection, language
+     distribution, token length distribution, conversation turn statistics
+   - `loft analyze --config data/marvin.yaml` that outputs a report
+   - Helps catch issues (e.g., 30% of samples are duplicates) before
+     spending time on a full training run
+
+10. Checkpoint evaluation pipeline [BASIC VERSION IMPLEMENTED]
+    - `loft eval` command: vLLM offline inference with bundled test prompts
+    - Supports config-based or explicit --model/--lora paths
+    - Side-by-side base vs LoRA comparison when LoRA detected
+    - Outputs .json (raw) and .md (human-readable)
+    - Future: integrate with lm-eval-harness for benchmark scores
+    - Future: batch eval across multiple checkpoints
+
+11. Training cost estimator
+    - Given estimated training time and GPU type, calculate cloud cost
+    - `loft estimate --config my-train.yaml --gpu A100 --provider runpod`
+    - Pulls pricing from known providers (RunPod, Lambda, Vast.ai)
+    - Combined with VRAM estimation (#3), gives a full "this run will cost
+      ~$X on Y GPU for Z hours" before you commit
+    - Even a rough estimate saves real money when choosing between providers
+
+12. Dataset mixing with temperature / reweighting
+    - When combining multiple datasets, control how much each contributes
+      beyond simple counts
+    - Temperature-based sampling: upweight rare/high-quality datasets,
+      downweight large/noisy ones
+    - Repeat small datasets N times to balance with larger ones (with
+      configurable epoch counts per dataset)
+    - Example:
+        datasets:
+          - dataset: high_quality_convos
+            weight: 3.0       # sample 3x more often
+          - dataset: bulk_text
+            weight: 0.5       # downsample
+    - Currently you can use `subset` for this, but weights are more
+      intuitive when the goal is proportional representation
+
+13. Conversation augmentation / reformatting
+    - Tools to transform conversation data before training:
+      a) System message variations (randomly pick from a pool)
+      b) Persona injection (prepend character descriptions)
+      c) Style transfer (rewrite assistant responses in a target style
+         using an LLM, cached so you only pay once)
+      d) Turn splitting (break multi-paragraph assistant responses into
+         multi-turn exchanges)
+    - `loft augment --config augment.yaml --input data/raw --output data/augmented`
+    - Useful for small datasets where you want more diversity
+
+14. Export / packaging for inference
+    - After training, package the model for deployment:
+      a) Merge LoRA into base model and save
+      b) Convert to GGUF for llama.cpp
+      c) Convert to AWQ/GPTQ for vLLM
+      d) Generate a model card with training details (dataset, hyperparams,
+         loss curve, eval results)
+    - `loft export --checkpoint output/final --format gguf --quant q4_k_m`
+    - Bridges the gap between "training done" and "model deployed"
+
+15. Loss spike attribution / batch provenance tracking
+    - When a training step produces an abnormally high loss or grad norm,
+      you want to know WHICH samples were in that batch
+    - Implementation approaches (from lightest to heaviest):
+      a) **Sample ID column**: During prepare, add a `_sample_id` column
+         (e.g., "{dataset_name}:{original_index}" or a hash). This column
+         gets carried through tokenization and chunking. At training time,
+         the data collator strips it before feeding to the model, but the
+         trainer logs it alongside step metrics.
+      b) **Batch index log**: At each training step, log the dataset indices
+         used in the batch to a lightweight sidecar file (jsonl). Only the
+         indices, not the full data — so it's cheap to write. Then a post-hoc
+         tool can look up "step 347 used samples [12, 489, 1023, ...]" and
+         retrieve the actual text.
+      c) **Spike-triggered dump**: Only log batch contents when loss exceeds
+         a threshold (e.g., 2x the rolling average). This keeps the log tiny
+         while capturing exactly the interesting batches. Could write the
+         full decoded text of flagged batches to a separate file for
+         immediate inspection.
+    - Approach (a) is the cleanest since we already control the prepare
+      pipeline and can bake IDs in at that level. The ID survives splitting
+      (chunk 2 of sample X gets ID "marvin:47:chunk2") so you can trace
+      back to the original document.
+    - Could also feed into automated data cleaning: after a training run,
+      export all spike-flagged sample IDs as a blocklist for the next prepare
+
+16. Pre-flight config check (`loft check`)
+    - A single command that validates everything BEFORE committing to a full
+      prepare or training run: `loft check --config configs/my-train.yaml`
+    - Runs three stages in sequence, all lightweight:
+      a) **Config validation**: Parse the training config + data config, check
+         for missing/invalid fields, verify paths exist (model, datasets,
+         output dir), warn about suspicious combinations (e.g., eval_split
+         set but eval_strategy="no", LoRA on a model that doesn't support it)
+      b) **Tokenization preview**: Run the existing debug_tokens inspector
+         (one sample per dataset) — shows raw -> preprocessed -> templated ->
+         tokenized -> loss mask for each dataset, so you can verify the
+         pipeline is doing what you expect
+      c) **VRAM estimation**: Given model size, batch size, max_length, LoRA
+         rank, optimizer, DeepSpeed stage, gradient checkpointing, etc.,
+         estimate peak VRAM usage per GPU (see #3 for the formula breakdown)
+    - All three stages are fast (seconds, not minutes) — none of them process
+      the full dataset or load the full model onto GPU
+    - Could also be run automatically as the first step of `loft sft`
+      with a `--preflight` flag
+
+
+== AUXILIARY LOSS IDEAS (not yet implemented) ==
+
+1. Training with temperature
+   - Apply temperature scaling to logits before computing cross-entropy loss.
+     With tau > 1, the loss becomes "softer" — the model isn't penalized as
+     harshly for spreading probability mass across multiple tokens.
+   - Implementation is trivial:
+       loss = cross_entropy(logits / tau, labels)
+   - Could be exposed as a config option:
+       training_temperature: 1.2   # default 1.0 = standard CE
+   - Note: this is different from label smoothing — it doesn't change the
+     target distribution, it changes how the model's distribution is scored.
+
+2. Adaptive label smoothing
+   - Instead of uniform label smoothing (where every token gets the same
+     smoothing factor), adapt the smoothing based on context ambiguity.
+   - The intuition: when multiple continuations are valid, tell the model
+     "several tokens were reasonable here" rather than forcing it toward
+     one-hot targets.
+   - Implementation outline:
+     1. Pre-compute ambiguity scores during prepare (n-gram entropy, model-based
+        entropy, or dataset-based duplicate detection)
+     2. Store as per-token metadata
+     3. Apply during loss computation with scaled smoothing factor
+   - Challenges:
+     * Computing ambiguity scores adds prepare-time overhead
+     * Need to tune the smoothing schedule
+     * May interact with assistant_only_loss masking
+
+
+== TEMPLATE / COMPATIBILITY IDEAS ==
+
+1. Library of jinja chat templates compatible with common models
+   - Ship a collection of chat templates (ChatML, Llama-3, Mistral, Gemma, etc.)
+     that include the `{% generation %}` tag required for native
+     `return_assistant_tokens_mask` support in HF tokenizers
+   - Currently most model-shipped templates lack `{% generation %}`, so the
+     tokenizer returns an all-zeros mask and we fall back to our own
+     `compute_assistant_mask_from_messages` (which works, but is slower and
+     requires re-tokenizing turn-by-turn)
+   - With `{% generation %}`-tagged templates, the tokenizer produces correct
+     masks natively in a single pass — simpler, faster, and less error-prone
+
+2. Axolotl config compatibility
+   - Allow users to run loft with existing Axolotl config files, making
+     migration easier for people coming from the Axolotl ecosystem
+   - Implementation options:
+     a) Config translator: `loft convert-config --from axolotl config.yaml`
+     b) Native parsing: detect Axolotl-style configs and translate on-the-fly
+     c) Compatibility layer: map Axolotl field names to loft equivalents

@@ -1014,7 +1014,7 @@ def main(
     output_override: Optional[str] = None,
     is_dry_run: bool = False,
     is_debug: bool = False,
-    debug_max_tokens: int = 200,
+    debug_max_tokens: int = 500,
 ):
     """Main entry point for the prepare command."""
     # Load training config
@@ -1078,13 +1078,13 @@ def make_parser(subparsers: Optional[argparse._SubParsersAction] = None):
         "--debug",
         action="store_true",
         default=False,
-        help="Show tokenization debug view for one sample per dataset (raw → template → tokens → loss mask)",
+        help="Show tokenized loss mask view for one sample per dataset",
     )
     parser.add_argument(
         "--debug-max-tokens",
         type=int,
-        default=200,
-        help="Max tokens to display in debug token-level view (default: 200)",
+        default=500,
+        help="Max tokens to display in debug token-level view (default: 500)",
     )
 
     return parser

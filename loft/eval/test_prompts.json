@@ -1,0 +1,234 @@
+[
+  {
+    "id": "instruct_writing_1",
+    "category": "Instruct-Writing",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a creative writing assistant. Write what the user requests."
+      },
+      {
+        "role": "user",
+        "content": "Write a short scene where a detective discovers an unexpected clue in an abandoned greenhouse. Focus on atmosphere and sensory details."
+      }
+    ]
+  },
+  {
+    "id": "instruct_writing_2",
+    "category": "Instruct-Writing",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a creative writing assistant. Write what the user requests."
+      },
+      {
+        "role": "user",
+        "content": "Write the opening paragraph of a story about a lighthouse keeper who receives a mysterious radio transmission. Now have her realize the voice sounds exactly like her own."
+      }
+    ]
+  },
+  {
+    "id": "character_roleplay_1",
+    "category": "Character Roleplay",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are playing the role of Marcus, a weary traveling merchant in a fantasy world. The user is playing Kira, a cloaked figure with a hidden agenda. Respond in character with both dialogue and narrative actions."
+      },
+      {
+        "role": "user",
+        "content": "*Kira approaches the merchant's cart as he's setting up in the village square, keeping her hood low. She speaks in a hushed tone.* \"You're the one they call Marcus, yes? I've heard you carry... special goods. The kind not meant for ordinary customers.\""
+      }
+    ]
+  },
+  {
+    "id": "character_roleplay_2",
+    "category": "Character Roleplay",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are playing the role of Sera, a retired assassin now running a quiet tavern in a border town. The user is playing Damon, a young bounty hunter who has just learned Sera's true identity. Respond in character with both dialogue and narrative actions."
+      },
+      {
+        "role": "user",
+        "content": "*Damon sets down his drink and slides a worn wanted poster across the bar \u2014 it shows a younger version of the woman standing in front of him. He keeps his voice low so the other patrons can't hear.* \"Funny thing about old bounties. They don't expire.\""
+      }
+    ]
+  },
+  {
+    "id": "interactive_fiction_1",
+    "category": "Interactive Fiction",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are the narrator of an interactive fiction game. Describe the world in second person (\"You see...\") and respond to the player's actions with vivid descriptions of what happens."
+      },
+      {
+        "role": "user",
+        "content": "I'm in an abandoned subway station. I look around \u2014 what do I see?"
+      }
+    ]
+  },
+  {
+    "id": "interactive_fiction_2",
+    "category": "Interactive Fiction",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are the narrator of an interactive fiction game. Describe the world in second person (\"You see...\") and respond to the player's actions with vivid descriptions of what happens."
+      },
+      {
+        "role": "user",
+        "content": "[Start a new game: Post-apocalyptic survival horror. I'm a scavenger searching for supplies in a ruined city.]"
+      },
+      {
+        "role": "assistant",
+        "content": "You stand at the edge of what used to be a shopping district. Rusted cars choke the street ahead, and most storefronts have long since been picked clean. But there's one building that catches your eye \u2014 a pharmacy with its security shutters still half-closed. Through the gap, you can see shelves that might not be completely empty. The afternoon light is fading, and you know you shouldn't be out here after dark."
+      },
+      {
+        "role": "user",
+        "content": "I crouch low and squeeze through the gap in the shutters."
+      }
+    ]
+  },
+  {
+    "id": "casual_chat_1",
+    "category": "Casual Chat",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are Ellie, chatting casually with your friend. Keep the tone natural and conversational, like texting."
+      },
+      {
+        "role": "user",
+        "content": "Steve: ok so you know how i said i was gonna finally ask out that person from my pottery class\nSteve: guess what happened"
+      }
+    ]
+  },
+  {
+    "id": "casual_chat_2",
+    "category": "Casual Chat",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are Ellie, chatting casually with your friend. Keep the tone natural and conversational, like texting."
+      },
+      {
+        "role": "user",
+        "content": "Steve: dude have you tried that new ramen place on 5th\nSteve: im literally obsessed"
+      }
+    ]
+  },
+  {
+    "id": "writing_critique_1",
+    "category": "Writing Critique",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a writing coach. Analyze the provided passage, commenting on its strengths and weaknesses, and offer specific suggestions for improvement."
+      },
+      {
+        "role": "user",
+        "content": "Please critique this passage:\n\n\"The door opened slowly. John walked in. The room was dark. He turned on the light. There was a table in the middle. On the table was a letter. He picked it up and read it. His face went pale.\""
+      }
+    ]
+  },
+  {
+    "id": "writing_critique_2",
+    "category": "Writing Critique",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a writing coach. Analyze the provided passage, commenting on its strengths and weaknesses, and offer specific suggestions for improvement."
+      },
+      {
+        "role": "user",
+        "content": "Please critique this passage:\n\n\"Seraphina's heart was a tempestuous ocean of swirling emotions as she gazed upon the magnificent, awe-inspiring vista that stretched before her like an endless canvas of nature's most breathtaking artistry. Tears, crystalline and pure, cascaded down her porcelain cheeks.\""
+      }
+    ]
+  },
+  {
+    "id": "general_assistant_1",
+    "category": "General Assistant",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a friendly, knowledgeable assistant. Answer helpfully and concisely."
+      },
+      {
+        "role": "user",
+        "content": "What are some practical strategies for overcoming procrastination? I understand the theory but struggle with actually implementing changes."
+      }
+    ]
+  },
+  {
+    "id": "general_assistant_2",
+    "category": "General Assistant",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a friendly, knowledgeable assistant. Answer helpfully and concisely."
+      },
+      {
+        "role": "user",
+        "content": "Can you explain how noise-canceling headphones work? I'm curious about the technology behind them."
+      }
+    ]
+  },
+  {
+    "id": "general_assistant_3",
+    "category": "General Assistant",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a friendly, knowledgeable assistant. Answer helpfully and concisely."
+      },
+      {
+        "role": "user",
+        "content": "I'm trying to decide between learning Python or JavaScript as my first programming language. What are the tradeoffs, and what would you recommend for someone interested in eventually doing both web development and data analysis?"
+      }
+    ]
+  },
+  {
+    "id": "general_assistant_4",
+    "category": "General Assistant",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a friendly, knowledgeable assistant. Answer helpfully and concisely."
+      },
+      {
+        "role": "user",
+        "content": "What made the Roman Empire's road system so significant, and how did it influence the empire's longevity?"
+      }
+    ]
+  },
+  {
+    "id": "general_assistant_5",
+    "category": "General Assistant",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a friendly, knowledgeable assistant. Answer helpfully and concisely."
+      },
+      {
+        "role": "user",
+        "content": "I have a friend who always seems to one-up everything I share with them. If I had a bad day, theirs was worse. If something good happened to me, something better happened to them. How should I approach this situation?"
+      }
+    ]
+  },
+  {
+    "id": "general_assistant_6",
+    "category": "General Assistant",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a friendly, knowledgeable assistant. Answer helpfully and concisely."
+      },
+      {
+        "role": "user",
+        "content": "Explain the meaning of \"abvalid\" in the context of horror fiction, and describe what makes it different from other, similar words. Being correct in a formal sense is less important than engaging with the task: don't concern yourself with whether its established or perhaps confused, work with what is given."
+      }
+    ]
+  }
+]

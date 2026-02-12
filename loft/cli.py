@@ -4,6 +4,8 @@ import sys
 
 from accelerate.commands.launch import launch_command, launch_command_parser
 
+from .scripts.eval import main as eval_main
+from .scripts.eval import make_parser as make_eval_parser
 from .scripts.prepare import main as prepare_main
 from .scripts.prepare import make_parser as make_prepare_parser
 from .scripts.sft import make_parser as make_sft_parser
@@ -226,10 +228,17 @@ def main():
             )
             return
 
+        if command == "eval":
+            eval_parser = make_eval_parser()
+            eval_args = eval_parser.parse_args(sys.argv[2:])
+            eval_main(eval_args)
+            return
+
     parser = TrlParser(prog="loft", usage="loft", allow_abbrev=False)
     subparsers = parser.add_subparsers(help="available commands", dest="command", parser_class=TrlParser)
 
     make_prepare_parser(subparsers)
+    make_eval_parser(subparsers)
     make_sft_parser(subparsers, include_dataset_args=False)
 
     args, launch_args = parser.parse_args_and_config(return_remaining_strings=True)
