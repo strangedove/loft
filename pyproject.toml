@@ -1,0 +1,119 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "loft"
+description = "Power-user SFT training toolkit"
+authors = [
+    { name = "Fizz", email = "fizzarolli@riseup.net" }
+]
+readme = { file = "README.md", content-type = "text/markdown" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = [
+    "transformers", "huggingface", "language modeling", "sft", "fine-tuning"
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13"
+]
+requires-python = ">=3.10"
+dependencies = [
+    "accelerate>=1.4.0",
+    "datasets>=3.0.0",
+    "deepspeed>=0.18.5",
+    "huggingface_hub>=0.25.0",
+    "numpy>=1.24.0",
+    "packaging>=21.0",
+    "pandas>=2.0.0",
+    "peft>=0.18.1",
+    "psutil>=5.9.0",
+    "pyarrow>=15.0.0",
+    "pyyaml>=6.0",
+    "safetensors>=0.4.0",
+    "torch>=2.0.0",
+    "transformers==4.57.3",
+    "wandb>=0.24.1",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/strangedove/loft"
+
+[project.scripts]
+loft = "loft.cli:main"
+
+[project.optional-dependencies]
+liger = [
+    "liger-kernel>=0.6.2"
+]
+cce = [
+    "cut-cross-entropy[transformers] @ git+https://github.com/axolotl-ai-cloud/ml-cross-entropy.git"
+]
+quality = [
+    "pyrefly",
+    "pre-commit",
+]
+quantization = [
+    "bitsandbytes"
+]
+dev = [
+    "liger-kernel>=0.6.2",
+    "cut-cross-entropy[transformers] @ git+https://github.com/axolotl-ai-cloud/ml-cross-entropy.git",
+    "pyrefly",
+    "pre-commit",
+    "bitsandbytes",
+    "parameterized",
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.version]
+path = "loft/__init__.py"
+pattern = "__version__ = '(?P<version>[^']+)'"
+
+[tool.hatch.envs.default]
+installer = "uv"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 119
+src = ["loft"]
+
+[tool.ruff.lint]
+ignore = [
+    "B028",
+    "C408",
+    "C901",
+    "E501",
+]
+extend-select = ["E", "F", "I", "W", "UP", "B", "T", "C"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/**.py" = ["T201"]
+"__init__.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
+known-first-party = ["loft"]
+
+[tool.basedpyright]
+reportUnusedImport = "none"
+reportMissingTypeStubs = "none"
+reportUnknownMemberType = "none"
+reportUnknownArgumentType = "none"
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
