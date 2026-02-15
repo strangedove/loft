@@ -85,6 +85,7 @@ from loft import (
     get_quantization_config,
 )
 from loft.import_utils import is_cce_available
+from loft.models.ministral3_compat import patch_mistral_for_ministral3
 from loft.scripts.utils import (
     build_prepare_config,
     load_prepared_dataset,
@@ -106,6 +107,7 @@ os.environ.setdefault("TRACKIO_SPACE_ID", "trl-trackio")
 def main(script_args, training_args, model_args, dataset_args):
     # Reduce CUDA memory fragmentation — critical for model_parallel where
     # multiple large tensors (embeddings, optimizer states) compete for space.
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     ################
@@ -178,6 +180,10 @@ def main(script_args, training_args, model_args, dataset_args):
     else:
         model = AutoModelForCausalLM.from_pretrained(model_args.model_name_or_path, **model_kwargs)
 
+    # Apply Ministral3 compatibility patch (Llama 4 query scaling).
+    # No-op if the config doesn't have the _ministral3_llama4_beta marker.
+    patch_mistral_for_ministral3(model)
+
     # When using model_parallel with device_map, accelerate's dispatch_model
     # installs hooks that move the model's output back to the input device
     # (GPU 0).  For large-vocab models this means the logits tensor (~2 GiB
@@ -222,6 +228,9 @@ def main(script_args, training_args, model_args, dataset_args):
                     c = c.to(target_device)
                 if bias is not None and bias.device != target_device:
                     bias = bias.to(target_device)
+                # Move num_items_in_batch to target device (used for loss / num_items_in_batch)
+                if "num_items_in_batch" in loss_kwargs and hasattr(loss_kwargs["num_items_in_batch"], "to"):
+                    loss_kwargs["num_items_in_batch"] = loss_kwargs["num_items_in_batch"].to(target_device)
                 # Triton launches kernels on the current CUDA device, so we must
                 # switch context to where the tensors live, then restore afterwards.
                 prev_device = torch.cuda.current_device()

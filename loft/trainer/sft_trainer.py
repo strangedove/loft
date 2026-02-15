@@ -2562,5 +2562,8 @@ class SFTTrainer(BaseTrainer):
             model_name = Path(self.args.output_dir).name
         else:
             model_name = self.args.hub_model_id.split("/")[-1]
-        self.create_model_card(model_name=model_name)
+        try:
+            self.create_model_card(model_name=model_name)
+        except Exception as e:
+            logger.warning(f"Failed to create model card: {e}")
         super()._save_checkpoint(model, trial)
