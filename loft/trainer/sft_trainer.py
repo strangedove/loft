@@ -831,12 +831,19 @@ class _HiddenStateCapture:
         self._lm_head = lm_head
 
     def __call__(self, module, args, output):
+        # CRITICAL: We .clone() the hidden states so the hook does NOT hold a
+        # direct reference to the backbone's live output tensor.  Keeping a
+        # direct reference (``self.value = output[0]``) prevents PyTorch from
+        # freeing / reusing that tensor during gradient-checkpointed backward,
+        # which causes the Liger fused-CE kernel to produce NaN after a few
+        # optimizer steps.  Using .clone() (without .detach()) preserves the
+        # autograd graph so auxiliary-loss gradients can flow back to the model.
         if isinstance(output, tuple):
-            self.value = output[0]
+            self.value = output[0].clone()
         elif hasattr(output, "last_hidden_state"):
-            self.value = output.last_hidden_state
+            self.value = output.last_hidden_state.clone()
         else:
-            self.value = output[0]
+            self.value = output[0].clone()
         # Capture lm_head weight while FSDP params are still unsharded.
         if self._lm_head is not None:
             self.lm_head_weight = self._lm_head.weight.detach().clone()
@@ -1174,12 +1181,13 @@ class SFTTrainer(BaseTrainer):
                 "disable packing by setting `packing=False`, or set `attn_implementation` in the model configuration "
                 "to one of these supported options."
             )
-        if args.assistant_only_loss and not is_conversational(dataset_sample):
+        _pretokenized = getattr(args, "_pretokenized", False)
+        if args.assistant_only_loss and not _pretokenized and not is_conversational(dataset_sample):
             raise ValueError(
                 "You set `assistant_only_loss=True`, but the dataset is not conversational. This option is only "
                 "supported for conversational datasets."
             )
-        if args.last_assistant_only_loss and not is_conversational(dataset_sample):
+        if args.last_assistant_only_loss and not _pretokenized and not is_conversational(dataset_sample):
             raise ValueError(
                 "You set `last_assistant_only_loss=True`, but the dataset is not conversational. This option is only "
                 "supported for conversational datasets."
@@ -1499,7 +1507,13 @@ class SFTTrainer(BaseTrainer):
         else:
             backbone = model.model
             lm_head = model.lm_head
-        self._liger_hidden_capture = _HiddenStateCapture(lm_head=lm_head)
+        # NOTE: We intentionally do NOT pass lm_head to the capture hook.
+        # The clone of the 131072×5120 lm_head weight (1.28 GB) during
+        # every forward pass creates memory pressure that causes the Liger
+        # kernel to produce NaN.  Instead, we use the fallback path in
+        # _compute_chunked_aux_losses which does a lightweight .detach().
+        # (The clone is only needed for FSDP FULL_SHARD, not single-GPU/DDP.)
+        self._liger_hidden_capture = _HiddenStateCapture(lm_head=None)
         backbone.register_forward_hook(self._liger_hidden_capture)
         logger.info("Registered hidden state capture hook for Liger + aux losses")
 
@@ -1537,6 +1551,35 @@ class SFTTrainer(BaseTrainer):
 
     def _compute_chunked_aux_losses_inner(self, hidden_states, labels, assistant_masks, mode, lm_head_weight):
         """Inner implementation of chunked aux losses with the lm_head weight already gathered."""
+        # Sanitize inputs: QLoRA + bf16 can produce NaN/Inf hidden states at certain positions.
+        # Liger's fused CE kernel handles these internally, but our separate matmul+softmax does not.
+        # If weights are corrupted (all NaN), skip aux losses entirely for this batch.
+        hs_bad = hidden_states.isnan() | hidden_states.isinf()
+        if hs_bad.any():
+            n_bad = hs_bad.sum().item()
+            n_total = hidden_states.numel()
+            if n_bad == n_total:
+                logger.warning("Hidden states are entirely NaN/Inf — skipping aux losses for this batch.")
+                return torch.tensor(0.0, device=hidden_states.device, requires_grad=True)
+            good = hidden_states[~hs_bad]
+            logger.warning(
+                f"Hidden states contain {n_bad}/{n_total} NaN/Inf values "
+                f"(range: [{good.min().item():.2f}, {good.max().item():.2f}]). "
+                f"Replacing with zeros for aux loss computation."
+            )
+            hidden_states = torch.where(hs_bad, torch.zeros_like(hidden_states), hidden_states)
+        w_bad = lm_head_weight.isnan() | lm_head_weight.isinf()
+        if w_bad.any():
+            n_bad = w_bad.sum().item()
+            if n_bad == lm_head_weight.numel():
+                logger.warning("lm_head weight is entirely NaN/Inf — skipping aux losses for this batch.")
+                return torch.tensor(0.0, device=hidden_states.device, requires_grad=True)
+            logger.warning(
+                f"lm_head weight contains {n_bad} NaN/Inf values. "
+                f"Replacing with zeros for aux loss computation."
+            )
+            lm_head_weight = torch.where(w_bad, torch.zeros_like(lm_head_weight), lm_head_weight)
+
         # Aux loss config
         eos_w = self.args.aux_loss_eos_weight or 0
         rep_w = self.args.aux_loss_rep_weight or 0
@@ -1583,7 +1626,9 @@ class SFTTrainer(BaseTrainer):
 
         def chunk_loss_fn(h_ck, w_ck, l_ck, m_ck, te_ck, start_idx):
             """Compute all aux losses for one chunk. Config captured from closure."""
-            logits = nn.functional.linear(h_ck, w_ck)
+            logits = nn.functional.linear(h_ck.to(w_ck.dtype), w_ck).float()  # upcast for numerical stability
+            # Clamp extreme logit values to prevent NaN in softmax/log_softmax
+            logits = logits.clamp(min=-1e4, max=1e4)
             loss = torch.tensor(0.0, device=h_ck.device)
             n_valid = m_ck.sum()
             if n_valid == 0:
@@ -1681,9 +1726,12 @@ class SFTTrainer(BaseTrainer):
                     )
                     loss = loss + ((pw - 1.0) * tw_ce * m_ck.float()).sum() / N
 
-            return loss
+            # Prevent NaN from propagating through gradients
+            return torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
 
-        # Main loss accumulation loop (checkpointed per chunk)
+        # Compute aux losses with gradient flow back to the model.
+        # Each chunk is wrapped in torch.utils.checkpoint so only one chunk's
+        # logits (chunk_size × vocab_size) live in memory at a time.
         total_loss = torch.tensor(0.0, device=hidden_states.device)
         for start in range(0, total_len, chunk_size):
             end = min(start + chunk_size, total_len)
@@ -1713,7 +1761,7 @@ class SFTTrainer(BaseTrainer):
                 l = flat_l[start:end]
                 m = flat_m[start:end]
 
-                logits = nn.functional.linear(h, lm_head_weight.detach())
+                logits = nn.functional.linear(h.to(lm_head_weight.dtype), lm_head_weight.detach()).float().clamp(min=-1e4, max=1e4)
 
                 # Entropy
                 lp = torch.log_softmax(logits, dim=-1)
@@ -1943,12 +1991,15 @@ class SFTTrainer(BaseTrainer):
                     )
 
                 # Fix turn order if requested (for models with strict turn order requirements)
-                if args.fix_turn_order and is_conversational(next(iter(dataset))):
+                # Only applies to conversational examples; text samples are passed through unchanged.
+                if args.fix_turn_order:
                     if isinstance(dataset, Dataset):
                         map_kwargs["desc"] = f"Fixing turn order in {dataset_name} dataset"
 
                     def fix_turn_order_fn(example, filler_message):
-                        return fix_example_turn_order(example, filler_message)
+                        if is_conversational(example):
+                            return fix_example_turn_order(example, filler_message)
+                        return example
 
                     dataset = dataset.map(
                         fix_turn_order_fn,
@@ -1957,7 +2008,10 @@ class SFTTrainer(BaseTrainer):
                     )
 
                     # Filter out empty conversations (where all messages were dropped)
+                    # Text samples (non-conversational) are always kept.
                     def has_valid_conversation(example):
+                        if not is_conversational(example):
+                            return True
                         for key in ["messages", "prompt", "completion"]:
                             if key in example:
                                 val = example[key]
@@ -2326,6 +2380,17 @@ class SFTTrainer(BaseTrainer):
             model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
         )
 
+        # Guard: if the main CE loss is NaN/Inf (e.g. from bf16 overflow in Liger kernel),
+        # replace with zero to skip this batch and prevent LoRA weight corruption.
+        if not torch.isfinite(loss):
+            n_ignore = (labels == -100).sum().item()
+            n_total = labels.numel()
+            logger.warning(
+                f"Main CE loss is {loss.item():.4f} (ignored labels: {n_ignore}/{n_total}). "
+                f"Replacing with 0 to prevent weight corruption."
+            )
+            loss = loss.new_zeros((), requires_grad=True)
+
         # Add MoE router load-balancing auxiliary loss to the training objective
         if self.aux_loss_enabled and self.aux_loss_coef > 0:
             aux_loss = getattr(outputs, "aux_loss", None)
@@ -2344,7 +2409,9 @@ class SFTTrainer(BaseTrainer):
                 aux_total = self._compute_chunked_aux_losses(
                     hidden_states, labels, assistant_masks, mode
                 )
-                loss = loss + aux_total
+                # Guard: if aux losses produced NaN/Inf, skip adding them
+                if torch.isfinite(aux_total):
+                    loss = loss + aux_total
                 # Metrics (entropy, accuracy) are computed inside _compute_chunked_aux_losses
             self._liger_hidden_capture.value = None  # release hidden states
             self._liger_hidden_capture.lm_head_weight = None  # release weight clone

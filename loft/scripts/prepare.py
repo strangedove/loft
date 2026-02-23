@@ -246,17 +246,17 @@ def preprocess_dataset(
         )
         stats.record("Add system messages", len(dataset))
 
-    # Fix turn order
-    if fix_turn_order and is_conversational(next(iter(dataset))):
+    # Fix turn order (only for conversational examples, skip text samples)
+    if fix_turn_order:
         before = len(dataset)
         dataset = dataset.map(
-            fix_example_turn_order,
-            fn_kwargs={"filler_message": fix_turn_order_filler},
+            lambda x: fix_example_turn_order(x, filler_message=fix_turn_order_filler)
+            if is_conversational(x) else x,
             desc="Fixing turn order",
             **map_kwargs,
         )
         dataset = dataset.filter(
-            lambda x: any(
+            lambda x: not is_conversational(x) or any(
                 isinstance(x.get(k), list) and len(x.get(k, [])) > 0
                 for k in ["messages", "prompt", "completion"]
             ),

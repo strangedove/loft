@@ -33,6 +33,7 @@ dependencies = [
     "cut-cross-entropy[transformers]",
     "datasets>=3.0.0",
     "deepspeed>=0.18.5",
+    "httpx>=0.28.1",
     "huggingface_hub>=0.25.0",
     "liger-kernel>=0.7.0",
     "numpy>=1.24.0",
@@ -129,3 +130,8 @@ markers = [
 
 [tool.uv.sources]
 cut-cross-entropy = { git = "https://github.com/axolotl-ai-cloud/ml-cross-entropy.git" }
+
+[dependency-groups]
+dev = [
+    "logbar>=0.2.1",
+]

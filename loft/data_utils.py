@@ -1581,6 +1581,25 @@ def apply_truncation_strategy_to_example(
     if "assistant_masks" in result and result["assistant_masks"] is not None and len(result["assistant_masks"]) > truncated_len:
         result["assistant_masks"] = result["assistant_masks"][:truncated_len]
 
+    # Fix truncated assistant turn-ends: if hard truncation cut into an assistant
+    # turn (last mask=1, last token != EOS), zero out the trailing mask positions.
+    # This prevents the EOS auxiliary loss from training the model to predict EOS
+    # at mid-sentence positions created by truncation boundaries.
+    if (
+        "assistant_masks" in result
+        and result["assistant_masks"] is not None
+        and result["assistant_masks"]
+        and result["assistant_masks"][-1] == 1
+        and result["input_ids"]
+        and result["input_ids"][-1] != eos_token_id
+    ):
+        masks = list(result["assistant_masks"])
+        i = len(masks) - 1
+        while i >= 0 and masks[i] == 1:
+            masks[i] = 0
+            i -= 1
+        result["assistant_masks"] = masks
+
     return result
 
 

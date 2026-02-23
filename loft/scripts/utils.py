@@ -928,11 +928,21 @@ class TrlParser(HfArgumentParser):
 
             # Set the defaults from the config values
             config_remaining_strings = self.set_defaults_with_config(**config)
+            # Remember which keys were explicitly set in the YAML config
+            # (used by build_prepare_config to distinguish "not set" from default False)
+            self._raw_yaml_keys = set(config.keys())
         else:
             config_remaining_strings = []
+            self._raw_yaml_keys = set()
 
         # Parse the arguments from the command line
         output = self.parse_args_into_dataclasses(args=args, return_remaining_strings=return_remaining_strings)
+
+        # Attach raw YAML keys to parsed dataclass instances so downstream code
+        # (e.g. build_prepare_config) can distinguish explicit config values from defaults
+        for obj in output:
+            if hasattr(obj, "__dataclass_fields__"):
+                obj._raw_yaml_keys = self._raw_yaml_keys
 
         # Merge remaining strings from the config file with the remaining strings from the command line
         if return_remaining_strings:
@@ -1464,11 +1474,17 @@ def build_prepare_config(training_args, model_args) -> dict:
             data_config = yaml.safe_load(f) or {}
 
     # Helper to get value with precedence: training_args > data_config > default
+    # Note: for boolean flags like assistant_only_loss, the SFTConfig dataclass
+    # default is False, which is indistinguishable from "not set" via getattr.
+    # We use _raw_yaml_keys to know which keys were explicitly set in the YAML.
+    _raw_yaml_keys = getattr(training_args, "_raw_yaml_keys", None) or set()
+
     def get_with_precedence(attr_name, default=None):
-        # Check training_args first (main config)
-        val = getattr(training_args, attr_name, None)
-        if val is not None:
-            return val
+        # Check training_args first — but only if the key was explicitly set in YAML
+        if attr_name in _raw_yaml_keys:
+            val = getattr(training_args, attr_name, None)
+            if val is not None:
+                return val
         # Fall back to data_config
         val = data_config.get(attr_name)
         if val is not None:
