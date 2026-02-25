@@ -149,6 +149,12 @@ def main(script_args, training_args, model_args, dataset_args):
         # Passing None would not be treated the same as omitting the argument, so we include it only when valid.
         model_kwargs["device_map"] = get_kbit_device_map(model_parallel=model_args.model_parallel)
         model_kwargs["quantization_config"] = quantization_config
+        # Workaround for transformers 5.x OOM during quantized model loading:
+        # async weight loading materializes multiple tensors to GPU at full precision
+        # concurrently before quantization, causing OOM for models that don't fit in
+        # full precision.  Sequential loading processes one tensor at a time:
+        # load → quantize → free → next.
+        os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
         import torch
         if model_args.model_parallel and torch.cuda.device_count() > 1:
             n_gpus = torch.cuda.device_count()

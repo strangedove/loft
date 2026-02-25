@@ -1481,6 +1481,13 @@ def create_model_from_path(model_id: str, **kwargs) -> PreTrainedModel:
             "Invalid `dtype` passed to the config. Expected either 'auto' or a string representing "
             f"a valid `torch.dtype` (e.g., 'float32'), but got {dtype}."
         )
+    # Workaround for transformers 5.x OOM during quantized model loading:
+    # async weight loading materializes multiple tensors to GPU at full precision
+    # concurrently before quantization.  Sequential loading avoids this.
+    quant_cfg = kwargs.get("quantization_config")
+    if quant_cfg is not None and getattr(quant_cfg, "load_in_4bit", False):
+        os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
+
     config = AutoConfig.from_pretrained(model_id)
     architecture = getattr(transformers, config.architectures[0])
     model = architecture.from_pretrained(model_id, **kwargs)
