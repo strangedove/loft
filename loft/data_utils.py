@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from collections import defaultdict, deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from itertools import takewhile
 from typing import Any, Callable, Optional, TypeVar, Union
 
@@ -1414,10 +1414,10 @@ def truncate_conversation_by_turns(
     # Calculate token length for system message
     system_tokens = 0
     if system_msg:
-        system_text = tokenizer.apply_chat_template(
+        system_result = tokenizer.apply_chat_template(
             [system_msg], tokenize=True, add_generation_prompt=False, chat_template=chat_template
         )
-        system_tokens = len(system_text)
+        system_tokens = len(system_result["input_ids"] if isinstance(system_result, Mapping) else system_result)
 
     # Calculate token lengths for each turn pair
     pair_tokens = []
@@ -1427,11 +1427,12 @@ def truncate_conversation_by_turns(
             full_conv = [system_msg] + pair
         else:
             full_conv = pair
-        pair_text = tokenizer.apply_chat_template(
+        pair_result = tokenizer.apply_chat_template(
             full_conv, tokenize=True, add_generation_prompt=False, chat_template=chat_template
         )
+        pair_ids = pair_result["input_ids"] if isinstance(pair_result, Mapping) else pair_result
         # Tokens for this pair = full - system
-        pair_tokens.append(len(pair_text) - system_tokens)
+        pair_tokens.append(len(pair_ids) - system_tokens)
 
     # Find how many pairs we can keep (from the start)
     # We want to keep the beginning of the conversation
@@ -1807,9 +1808,10 @@ def compute_assistant_mask_from_messages(
     This is much more robust than token-matching as it uses the template logic.
     """
     # 1. Get the full tokenized sequence
-    full_ids = tokenizer.apply_chat_template(
+    full_result = tokenizer.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=False, **template_kwargs
     )
+    full_ids = full_result["input_ids"] if isinstance(full_result, Mapping) else full_result
     mask = [0] * len(full_ids)
 
     # 2. Iterate through messages and find assistant turns
@@ -1818,14 +1820,16 @@ def compute_assistant_mask_from_messages(
         if role.lower() in ("assistant", "gpt"):
             # Find where this assistant turn starts
             # Prefix is everything before this message + the generation prompt (header)
-            prefix_ids = tokenizer.apply_chat_template(
+            prefix_result = tokenizer.apply_chat_template(
                 messages[:i], tokenize=True, add_generation_prompt=True, **template_kwargs
             )
+            prefix_ids = prefix_result["input_ids"] if isinstance(prefix_result, Mapping) else prefix_result
             # Find where this assistant turn ends
             # Context is everything up to and including this message
-            full_turn_ids = tokenizer.apply_chat_template(
+            full_turn_result = tokenizer.apply_chat_template(
                 messages[:i+1], tokenize=True, add_generation_prompt=False, **template_kwargs
             )
+            full_turn_ids = full_turn_result["input_ids"] if isinstance(full_turn_result, Mapping) else full_turn_result
             
             start_idx = len(prefix_ids)
             end_idx = len(full_turn_ids)
@@ -1881,13 +1885,14 @@ def tokenize_sft_example(
     if "prompt" in example:  # prompt-completion case
         output = {}
         if is_conversational(example):
-            prompt_ids = processing_class.apply_chat_template(
+            prompt_result = processing_class.apply_chat_template(
                 example["prompt"],
                 tokenize=True,
                 add_generation_prompt=True,
                 tools=example.get("tools"),
                 **example.get("chat_template_kwargs", {}),
             )
+            prompt_ids = prompt_result["input_ids"] if isinstance(prompt_result, Mapping) else prompt_result
             prompt_ids = prompt_ids[0] if isinstance(prompt_ids[0], list) else prompt_ids
             prompt_completion_processed = processing_class.apply_chat_template(
                 example["prompt"] + example["completion"],

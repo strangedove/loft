@@ -85,7 +85,6 @@ from loft import (
     get_quantization_config,
 )
 from loft.import_utils import is_cce_available
-from loft.models.ministral3_compat import patch_mistral_for_ministral3
 from loft.scripts.utils import (
     build_prepare_config,
     load_prepared_dataset,
@@ -179,10 +178,6 @@ def main(script_args, training_args, model_args, dataset_args):
         model = AutoModelForImageTextToText.from_pretrained(model_args.model_name_or_path, **model_kwargs)
     else:
         model = AutoModelForCausalLM.from_pretrained(model_args.model_name_or_path, **model_kwargs)
-
-    # Apply Ministral3 compatibility patch (Llama 4 query scaling).
-    # No-op if the config doesn't have the _ministral3_llama4_beta marker.
-    patch_mistral_for_ministral3(model)
 
     # When using model_parallel with device_map, accelerate's dispatch_model
     # installs hooks that move the model's output back to the input device

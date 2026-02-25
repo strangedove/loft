@@ -16,6 +16,7 @@ import contextlib
 import math
 import os
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
@@ -45,6 +46,7 @@ from ..data_utils import (
     add_system_message_to_example,
     apply_chat_template,
     apply_truncation_strategy_to_example,
+    compute_assistant_mask_from_messages,
     convert_binary_preference_to_sft,
     convert_preference_to_sft,
     expand_split_chunks,
@@ -2142,13 +2144,14 @@ class SFTTrainer(BaseTrainer):
                             if self._is_vlm:
                                 prepare_multimodal_messages(example["prompt"], num_images=0)
                                 prepare_multimodal_messages(example["completion"], num_images=0)
-                            prompt_ids = processing_class.apply_chat_template(
+                            prompt_result = processing_class.apply_chat_template(
                                 example["prompt"],
                                 tokenize=True,
                                 add_generation_prompt=True,
                                 tools=example.get("tools"),
                                 **example.get("chat_template_kwargs", {}),
                             )
+                            prompt_ids = prompt_result["input_ids"] if isinstance(prompt_result, Mapping) else prompt_result
                             # Fix transformers inconsistency: for VLMs, apply_chat_template returns lists of lists
                             # even for single examples, while for LLMs it returns lists of ints.
                             prompt_ids = prompt_ids[0] if isinstance(prompt_ids[0], list) else prompt_ids
@@ -2169,6 +2172,16 @@ class SFTTrainer(BaseTrainer):
                             prompt_completion_ids = prompt_completion_processed["input_ids"]
                             if "assistant_masks" in prompt_completion_processed:
                                 output["assistant_masks"] = prompt_completion_processed["assistant_masks"]
+
+                            # Fallback: if mask is missing or all zeros, compute from messages
+                            if need_assistant_masks:
+                                asst_masks = output.get("assistant_masks", [])
+                                if not asst_masks or sum(asst_masks) == 0:
+                                    output["assistant_masks"] = compute_assistant_mask_from_messages(
+                                        example["prompt"] + example["completion"],
+                                        processing_class,
+                                        **example.get("chat_template_kwargs", {}),
+                                    )
                         else:
                             prompt_ids = processing_class(text=example["prompt"])["input_ids"]
                             prompt_completion_ids = processing_class(text=example["prompt"] + example["completion"])[
@@ -2204,6 +2217,16 @@ class SFTTrainer(BaseTrainer):
                             # even for single examples, while for LLMs it returns lists of ints.
                             processed = {k: v[0] if isinstance(v[0], list) else v for k, v in processed.items()}
                             output = {k: processed[k] for k in ("input_ids", "assistant_masks") if k in processed}
+
+                            # Fallback: if mask is missing or all zeros, compute from messages
+                            if need_assistant_masks:
+                                asst_masks = output.get("assistant_masks", [])
+                                if not asst_masks or sum(asst_masks) == 0:
+                                    output["assistant_masks"] = compute_assistant_mask_from_messages(
+                                        example["messages"],
+                                        processing_class,
+                                        **example.get("chat_template_kwargs", {}),
+                                    )
                         else:
                             output = {"input_ids": processing_class(text=example[dataset_text_field])["input_ids"]}
 

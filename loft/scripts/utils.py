@@ -887,7 +887,109 @@ class TrlParser(HfArgumentParser):
                     f"config file path and should not be used in the dataclass."
                 )
 
+        # Track which field names have been registered so we can skip duplicates
+        # across dataclasses. Transformers 5.x HfArgumentParser raises on conflicts.
+        self._registered_field_names: set[str] = set()
         super().__init__(dataclass_types=dataclass_types, **kwargs)
+
+    def _add_dataclass_arguments(self, dtype):
+        """Override to skip fields that were already registered by a prior dataclass."""
+        import dataclasses as _dc
+
+        # Find fields in this dataclass that conflict with previously registered ones
+        dupes = {f.name for f in _dc.fields(dtype) if f.name in self._registered_field_names}
+        if dupes:
+            # Temporarily remove duplicate fields so the parent doesn't re-register them
+            original_fields = dtype.__dataclass_fields__.copy()
+            for name in dupes:
+                del dtype.__dataclass_fields__[name]
+            try:
+                super()._add_dataclass_arguments(dtype)
+            finally:
+                dtype.__dataclass_fields__ = original_fields
+        else:
+            super()._add_dataclass_arguments(dtype)
+
+        # Record all field names from this dataclass
+        self._registered_field_names.update(f.name for f in _dc.fields(dtype))
+
+    def parse_args_into_dataclasses(self, *args, **kwargs):
+        """Override to handle shared fields across multiple dataclasses.
+
+        When field names appear in more than one dataclass (e.g. eval_split in
+        both SFTConfig and DatasetMixtureConfig), the parent's implementation
+        does ``delattr`` on each field, causing the second dataclass to fail.
+        We stash shared values so later dataclasses can still see them.
+        """
+        import dataclasses as _dc
+
+        # Identify field names that appear in multiple dataclasses
+        field_counts: dict[str, int] = {}
+        for dtype in self.dataclass_types:
+            for f in _dc.fields(dtype):
+                if f.init:
+                    field_counts[f.name] = field_counts.get(f.name, 0) + 1
+        shared_fields = {name for name, count in field_counts.items() if count > 1}
+
+        if not shared_fields:
+            return super().parse_args_into_dataclasses(*args, **kwargs)
+
+        # Monkey-patch the namespace's delattr to stash shared values
+        # before deletion so they can be re-injected for later dataclasses
+        _stash: dict[str, object] = {}
+        _orig_parse = super().parse_args_into_dataclasses
+
+        # We need to intercept at a lower level.  Re-implement the dataclass
+        # population loop with tolerance for shared fields.
+        result = _orig_parse.__func__  # noqa – just checking availability
+
+        # Simplest: parse once, then manually build dataclass instances
+        parse_kwargs = {}
+        for k in ("args", "return_remaining_strings", "look_for_args_file", "args_filename", "args_file_flag"):
+            if k in kwargs:
+                parse_kwargs[k] = kwargs[k]
+        if args:
+            parse_kwargs["args"] = args[0] if args else None
+
+        return_remaining = kwargs.get("return_remaining_strings", False) or (
+            len(args) > 1 and args[1] if len(args) > 1 else False
+        )
+
+        # Use parent's parse_known_args to get the namespace
+        import sys as _sys
+        call_args = parse_kwargs.get("args")
+        if call_args is None:
+            call_args = _sys.argv[1:]
+        namespace, remaining_args = self.parse_known_args(args=call_args)
+
+        outputs = []
+        for dtype in self.dataclass_types:
+            keys = {f.name for f in _dc.fields(dtype) if f.init}
+            ns_dict = vars(namespace)
+            # Get values from namespace or stash
+            inputs = {}
+            for k in keys:
+                if k in ns_dict:
+                    inputs[k] = ns_dict[k]
+                elif k in _stash:
+                    inputs[k] = _stash[k]
+            # Remove from namespace, stashing shared values
+            for k in keys:
+                if k in ns_dict:
+                    if k in shared_fields:
+                        _stash[k] = ns_dict[k]
+                    try:
+                        delattr(namespace, k)
+                    except AttributeError:
+                        pass
+            obj = dtype(**inputs)
+            outputs.append(obj)
+
+        if len(namespace.__dict__) > 0:
+            outputs.append(namespace)
+        if return_remaining:
+            return (*outputs, remaining_args)
+        return tuple(outputs)
 
     def parse_args_and_config(
         self,
