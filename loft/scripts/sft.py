@@ -149,33 +149,31 @@ def main(script_args, training_args, model_args, dataset_args):
         # Passing None would not be treated the same as omitting the argument, so we include it only when valid.
         model_kwargs["device_map"] = get_kbit_device_map(model_parallel=model_args.model_parallel)
         model_kwargs["quantization_config"] = quantization_config
+        # If the model already has a different quantization method (e.g. FP8) but the user
+        # wants BitsAndBytes, clear the pre-existing config so they don't conflict.
+        existing_quant = getattr(config, "quantization_config", None)
+        if existing_quant and existing_quant.get("quant_method") != "bitsandbytes":
+            logger.info(
+                f"Clearing model's pre-existing {existing_quant.get('quant_method')} quantization "
+                f"config in favor of BitsAndBytes {('4-bit' if model_args.load_in_4bit else '8-bit')}"
+            )
+            del config.quantization_config
+            model_kwargs["config"] = config
         # Workaround for transformers 5.x OOM during quantized model loading:
         # async weight loading materializes multiple tensors to GPU at full precision
         # concurrently before quantization, causing OOM for models that don't fit in
         # full precision.  Sequential loading processes one tensor at a time:
         # load → quantize → free → next.
         os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
-        import torch
-        if model_args.model_parallel and torch.cuda.device_count() > 1:
-            n_gpus = torch.cuda.device_count()
-            n_layers = config.num_hidden_layers
-            last = n_gpus - 1
-            # Pin special modules: embeddings on GPU 0, output head + norm
-            # on the last GPU so the large logits tensor doesn't compete
-            # with embeddings for memory.  Hidden layers are distributed
-            # evenly across all GPUs.
-            device_map = {"model.embed_tokens": 0, "lm_head": last,
-                          "model.norm": last, "model.rotary_emb": last}
-            layers_per_gpu = n_layers // n_gpus
-            extra = n_layers % n_gpus
-            layer_idx = 0
-            for gpu in range(n_gpus):
-                # Distribute remainder layers one each to the first `extra` GPUs
-                count = layers_per_gpu + (1 if gpu < extra else 0)
-                for _ in range(count):
-                    device_map[f"model.layers.{layer_idx}"] = gpu
-                    layer_idx += 1
-            model_kwargs["device_map"] = device_map
+
+    import torch
+    if model_args.model_parallel and torch.cuda.device_count() > 1:
+        # Let accelerate's infer_auto_device_map handle memory-aware placement.
+        # A manual device_map with a "" catch-all can interfere with sub-module
+        # dispatch hooks (e.g. layernorm weights placed on the wrong GPU during
+        # gradient checkpointing recomputation).  "auto" generates explicit
+        # per-module entries and avoids this class of device mismatch.
+        model_kwargs["device_map"] = "auto"
     valid_image_text_architectures = MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES.values()
 
     if config.architectures and any(arch in valid_image_text_architectures for arch in config.architectures):

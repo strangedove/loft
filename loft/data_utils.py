@@ -1586,8 +1586,12 @@ def apply_truncation_strategy_to_example(
     # turn (last mask=1, last token != EOS), zero out the trailing mask positions.
     # This prevents the EOS auxiliary loss from training the model to predict EOS
     # at mid-sentence positions created by truncation boundaries.
+    # Only apply when truncation actually shortened the sequence — some chat
+    # templates append a trailing \n after EOS which would falsely trigger this.
+    was_truncated = truncated_len < len(input_ids)
     if (
-        "assistant_masks" in result
+        was_truncated
+        and "assistant_masks" in result
         and result["assistant_masks"] is not None
         and result["assistant_masks"]
         and result["assistant_masks"][-1] == 1

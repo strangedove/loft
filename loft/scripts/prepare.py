@@ -509,6 +509,12 @@ def prepare_dataset(
     """
     stats = PipelineStats()
 
+    # Disable HF datasets caching — prepare saves its output to parquet so
+    # intermediate .map() caches are redundant and can serve stale results
+    # when the underlying transform functions are updated.
+    from datasets import disable_caching
+    disable_caching()
+
     # Extract settings from training config
     data_config_path = training_config.get("data_config")
     if not data_config_path:

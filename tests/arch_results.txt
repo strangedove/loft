@@ -1,0 +1,496 @@
+================================================================
+Loft Architecture & Feature Test Results
+Date: 2026-02-26 00:25:55 UTC
+================================================================
+
+------------------------------------------------------------
+TEST 1: qwen3-0.6b-lora
+Description: Qwen3 0.6B, LoRA, single GPU
+Started: 2026-02-26 00:25:55 UTC
+Status: PASS
+Finished: 2026-02-26 00:26:10 UTC
+
+--- Last 30 lines of log ---
+Truncating:   0%|          | 0/100 [00:00<?, ? examples/s]Truncating: 100%|██████████| 100/100 [00:00<00:00, 3934.40 examples/s]
+   Truncate strategy: all samples capped at 256 tokens
+
+📊 No eval split requested.
+
+📊 Pipeline summary:
+  Loaded                      100
+  After preprocessing         100
+  Tokenize                    100
+  Truncation (truncate)       100  (truncated to 256 tokens)
+  Final (no eval)             100
+
+💾 Saving to /tmp/loft-arch-4YAapX/t1/prepared...
+Creating parquet from Arrow format:   0%|          | 0/1 [00:00<?, ?ba/s]Creating parquet from Arrow format: 100%|██████████| 1/1 [00:00<00:00, 721.54ba/s]
+   train: 100 samples (0.0 MB)
+
+✅ Dataset ready! 100 total (100 train, 0 eval)
+   Saved to /tmp/loft-arch-4YAapX/t1/prepared
+
+📊 Token statistics:
+   Train: 15,117 tokens (10,672 trainable)
+   Total: 15,117 tokens (10,672 trainable)
+
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 100 examples [00:00, 36386.78 examples/s]
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'bos_token_id': None, 'pad_token_id': 151643}.
+  0%|          | 0/3 [00:00<?, ?it/s] 33%|███▎      | 1/3 [00:00<00:01,  1.58it/s]                                              33%|███▎      | 1/3 [00:00<00:01,  1.58it/s] 67%|██████▋   | 2/3 [00:00<00:00,  2.67it/s]                                              67%|██████▋   | 2/3 [00:00<00:00,  2.67it/s]100%|██████████| 3/3 [00:01<00:00,  3.45it/s]                                             100%|██████████| 3/3 [00:01<00:00,  3.45it/s]                                             100%|██████████| 3/3 [00:01<00:00,  3.45it/s]100%|██████████| 3/3 [00:01<00:00,  2.95it/s]
+{'loss': '1.542', 'grad_norm': '3.195', 'learning_rate': '2e-05', 'entropy': '0.9438', 'num_tokens': '154', 'mean_token_accuracy': '0.6697', 'epoch': '0.01'}
+{'loss': '1.509', 'grad_norm': '3.374', 'learning_rate': '2e-05', 'entropy': '0.9338', 'num_tokens': '308', 'mean_token_accuracy': '0.6881', 'epoch': '0.02'}
+{'loss': '1.53', 'grad_norm': '3.191', 'learning_rate': '2e-05', 'entropy': '0.9516', 'num_tokens': '462', 'mean_token_accuracy': '0.6697', 'epoch': '0.03'}
+{'train_runtime': '1.019', 'train_samples_per_second': '2.945', 'train_steps_per_second': '2.945', 'train_loss': '1.527', 'epoch': '0.03'}
+
+
+------------------------------------------------------------
+TEST 2: qwen3-vl-2b-lora
+Description: Qwen3-VL 2B (multimodal), LoRA on text, single GPU
+Started: 2026-02-26 00:26:13 UTC
+Status: PASS
+Finished: 2026-02-26 00:26:31 UTC
+
+--- Last 30 lines of log ---
+Truncating:   0%|          | 0/100 [00:00<?, ? examples/s]Truncating: 100%|██████████| 100/100 [00:00<00:00, 4008.62 examples/s]
+   Truncate strategy: all samples capped at 256 tokens
+
+📊 No eval split requested.
+
+📊 Pipeline summary:
+  Loaded                      100
+  After preprocessing         100
+  Tokenize                    100
+  Truncation (truncate)       100  (truncated to 256 tokens)
+  Final (no eval)             100
+
+💾 Saving to /tmp/loft-arch-4YAapX/t2/prepared...
+Creating parquet from Arrow format:   0%|          | 0/1 [00:00<?, ?ba/s]Creating parquet from Arrow format: 100%|██████████| 1/1 [00:00<00:00, 652.51ba/s]
+   train: 100 samples (0.0 MB)
+
+✅ Dataset ready! 100 total (100 train, 0 eval)
+   Saved to /tmp/loft-arch-4YAapX/t2/prepared
+
+📊 Token statistics:
+   Train: 14,717 tokens (10,272 trainable)
+   Total: 14,717 tokens (10,272 trainable)
+
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 100 examples [00:00, 28025.55 examples/s]
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'eos_token_id': 151645, 'bos_token_id': None, 'pad_token_id': 151643}.
+  0%|          | 0/3 [00:00<?, ?it/s] 33%|███▎      | 1/3 [00:00<00:01,  1.35it/s]                                              33%|███▎      | 1/3 [00:00<00:01,  1.35it/s] 67%|██████▋   | 2/3 [00:01<00:00,  2.06it/s]                                              67%|██████▋   | 2/3 [00:01<00:00,  2.06it/s]100%|██████████| 3/3 [00:01<00:00,  2.49it/s]                                             100%|██████████| 3/3 [00:01<00:00,  2.49it/s]                                             100%|██████████| 3/3 [00:01<00:00,  2.49it/s]100%|██████████| 3/3 [00:01<00:00,  2.22it/s]
+{'loss': '1.34', 'grad_norm': '6.159', 'learning_rate': '2e-05', 'entropy': '0.6261', 'num_tokens': '150', 'mean_token_accuracy': '0.7238', 'epoch': '0.01'}
+{'loss': '1.379', 'grad_norm': '6.486', 'learning_rate': '2e-05', 'entropy': '0.6218', 'num_tokens': '300', 'mean_token_accuracy': '0.6952', 'epoch': '0.02'}
+{'loss': '1.334', 'grad_norm': '6.097', 'learning_rate': '2e-05', 'entropy': '0.6438', 'num_tokens': '450', 'mean_token_accuracy': '0.7238', 'epoch': '0.03'}
+{'train_runtime': '1.353', 'train_samples_per_second': '2.218', 'train_steps_per_second': '2.218', 'train_loss': '1.351', 'epoch': '0.03'}
+
+
+------------------------------------------------------------
+TEST 3: voxtral-3b-lora
+Description: Voxtral-Mini 3B (Mistral arch), LoRA, single GPU
+Started: 2026-02-26 00:26:35 UTC
+Status: PASS
+Finished: 2026-02-26 00:26:47 UTC
+
+--- Last 30 lines of log ---
+   Truncate strategy: all samples capped at 256 tokens
+
+📊 No eval split requested.
+
+📊 Pipeline summary:
+  Loaded                      100
+  After preprocessing         100
+  Tokenize                    100
+  Truncation (truncate)       100  (truncated to 256 tokens)
+  Final (no eval)             100
+
+💾 Saving to /tmp/loft-arch-4YAapX/t3/prepared...
+Creating parquet from Arrow format:   0%|          | 0/1 [00:00<?, ?ba/s]Creating parquet from Arrow format: 100%|██████████| 1/1 [00:00<00:00, 649.47ba/s]
+   train: 100 samples (0.0 MB)
+
+✅ Dataset ready! 100 total (100 train, 0 eval)
+   Saved to /tmp/loft-arch-4YAapX/t3/prepared
+
+📊 Token statistics:
+   Train: 14,517 tokens (10,872 trainable)
+   Total: 14,517 tokens (10,872 trainable)
+
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 100 examples [00:00, 34039.15 examples/s]
+The tokenizer you are loading from '/home/aibox/.cache/huggingface/hub/models--minpeter--Voxtral-Mini-3B-Text-2507-hf/snapshots/cd45cc1eb9c33d5957d5be9af9a884f75b38a3e6' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'pad_token_id': 11}.
+  0%|          | 0/3 [00:00<?, ?it/s] 33%|███▎      | 1/3 [00:00<00:01,  1.65it/s]                                              33%|███▎      | 1/3 [00:00<00:01,  1.65it/s] 67%|██████▋   | 2/3 [00:00<00:00,  2.86it/s]                                              67%|██████▋   | 2/3 [00:00<00:00,  2.86it/s]100%|██████████| 3/3 [00:00<00:00,  3.77it/s]                                             100%|██████████| 3/3 [00:00<00:00,  3.77it/s]                                             100%|██████████| 3/3 [00:00<00:00,  3.77it/s]100%|██████████| 3/3 [00:00<00:00,  3.18it/s]
+{'loss': '1.958', 'grad_norm': '3.722', 'learning_rate': '2e-05', 'entropy': '1.608', 'num_tokens': '148', 'mean_token_accuracy': '0.6577', 'epoch': '0.01'}
+{'loss': '1.897', 'grad_norm': '2.811', 'learning_rate': '2e-05', 'entropy': '1.586', 'num_tokens': '296', 'mean_token_accuracy': '0.6667', 'epoch': '0.02'}
+{'loss': '1.871', 'grad_norm': '3.599', 'learning_rate': '2e-05', 'entropy': '1.592', 'num_tokens': '444', 'mean_token_accuracy': '0.6847', 'epoch': '0.03'}
+{'train_runtime': '0.9432', 'train_samples_per_second': '3.181', 'train_steps_per_second': '3.181', 'train_loss': '1.909', 'epoch': '0.03'}
+
+
+------------------------------------------------------------
+TEST 4: trinity-nano-scm-lora
+Description: Trinity-Nano-SCM (MoE), LoRA, single GPU, trust_remote_code
+Started: 2026-02-26 00:26:51 UTC
+Status: PASS
+Finished: 2026-02-26 00:27:31 UTC
+
+--- Last 30 lines of log ---
+
+💾 Saving to /tmp/loft-arch-4YAapX/t4/prepared...
+Creating parquet from Arrow format:   0%|          | 0/1 [00:00<?, ?ba/s]Creating parquet from Arrow format: 100%|██████████| 1/1 [00:00<00:00, 726.29ba/s]
+   train: 100 samples (0.0 MB)
+
+✅ Dataset ready! 100 total (100 train, 0 eval)
+   Saved to /tmp/loft-arch-4YAapX/t4/prepared
+
+📊 Token statistics:
+   Train: 12,400 tokens (8,300 trainable)
+   Total: 12,400 tokens (8,300 trainable)
+
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 100 examples [00:00, 32627.80 examples/s]
+The tokenizer you are loading from '/home/aibox/.cache/huggingface/hub/models--IntervitensInc--Trinity-Nano-Preview-SCM/snapshots/1ced0152dd7d8357a8742b1a8510a59ae6042d7b' with an incorrect regex pattern: https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/discussions/84#69121093e8b480e709447d5e. This will lead to incorrect tokenization. You should set the `fix_mistral_regex=True` flag when loading this tokenizer to fix this issue.
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'eos_token_id': 3, 'bos_token_id': 0, 'pad_token_id': 12}.
+  0%|          | 0/3 [00:00<?, ?it/s]/home/aibox/.cache/huggingface/modules/transformers_modules/_1ced0152dd7d8357a8742b1a8510a59ae6042d7b/modeling_afmoe_scm.py:566: FutureWarning: `input_embeds` is deprecated and will be removed in version 5.6.0 for `create_causal_mask`. Use `inputs_embeds` instead.
+  "full_attention": create_causal_mask(**mask_kwargs),
+/home/aibox/.cache/huggingface/modules/transformers_modules/_1ced0152dd7d8357a8742b1a8510a59ae6042d7b/modeling_afmoe_scm.py:567: FutureWarning: `input_embeds` is deprecated and will be removed in version 5.6.0 for `create_sliding_window_causal_mask`. Use `inputs_embeds` instead.
+  "sliding_attention": create_sliding_window_causal_mask(**mask_kwargs),
+ 33%|███▎      | 1/3 [00:06<00:13,  6.53s/it]                                              33%|███▎      | 1/3 [00:06<00:13,  6.53s/it]/home/aibox/.cache/huggingface/modules/transformers_modules/_1ced0152dd7d8357a8742b1a8510a59ae6042d7b/modeling_afmoe_scm.py:566: FutureWarning: `input_embeds` is deprecated and will be removed in version 5.6.0 for `create_causal_mask`. Use `inputs_embeds` instead.
+  "full_attention": create_causal_mask(**mask_kwargs),
+/home/aibox/.cache/huggingface/modules/transformers_modules/_1ced0152dd7d8357a8742b1a8510a59ae6042d7b/modeling_afmoe_scm.py:567: FutureWarning: `input_embeds` is deprecated and will be removed in version 5.6.0 for `create_sliding_window_causal_mask`. Use `inputs_embeds` instead.
+  "sliding_attention": create_sliding_window_causal_mask(**mask_kwargs),
+ 67%|██████▋   | 2/3 [00:07<00:03,  3.28s/it]                                              67%|██████▋   | 2/3 [00:07<00:03,  3.28s/it]100%|██████████| 3/3 [00:08<00:00,  2.24s/it]                                             100%|██████████| 3/3 [00:08<00:00,  2.24s/it]                                             100%|██████████| 3/3 [00:08<00:00,  2.24s/it]100%|██████████| 3/3 [00:08<00:00,  2.85s/it]
+/home/aibox/.venv/lib/python3.12/site-packages/transformers/modeling_rope_utils.py:936: FutureWarning: `rope_config_validation` is deprecated and has been removed. Its functionality has been moved to RotaryEmbeddingConfigMixin.validate_rope method. PreTrainedConfig inherits this class, so please call self.validate_rope() instead. Also, make sure to use the new rope_parameters syntax. You can call self.standardize_rope_params() in the meantime.
+  warnings.warn(
+{'loss': '1.627', 'grad_norm': '30.08', 'learning_rate': '2e-05', 'entropy': '0.8095', 'num_tokens': '124', 'mean_token_accuracy': '0.5904', 'epoch': '0.01'}
+{'loss': '1.411', 'grad_norm': '23.67', 'learning_rate': '2e-05', 'entropy': '0.7598', 'num_tokens': '248', 'mean_token_accuracy': '0.6265', 'epoch': '0.02'}
+{'loss': '1.268', 'grad_norm': '19.09', 'learning_rate': '2e-05', 'entropy': '0.8237', 'num_tokens': '372', 'mean_token_accuracy': '0.6506', 'epoch': '0.03'}
+{'train_runtime': '8.547', 'train_samples_per_second': '0.351', 'train_steps_per_second': '0.351', 'train_loss': '1.435', 'epoch': '0.03'}
+
+
+------------------------------------------------------------
+TEST 5: ministral3-14b-qlora
+Description: Ministral3 14B, QLoRA, single GPU
+Started: 2026-02-26 00:27:34 UTC
+Status: PASS
+Finished: 2026-02-26 00:27:59 UTC
+
+--- Last 30 lines of log ---
+   Truncate strategy: all samples capped at 256 tokens
+
+📊 No eval split requested.
+
+📊 Pipeline summary:
+  Loaded                      100
+  After preprocessing         100
+  Tokenize                    100
+  Truncation (truncate)       100  (truncated to 256 tokens)
+  Final (no eval)             100
+
+💾 Saving to /tmp/loft-arch-4YAapX/t5/prepared...
+Creating parquet from Arrow format:   0%|          | 0/1 [00:00<?, ?ba/s]Creating parquet from Arrow format: 100%|██████████| 1/1 [00:00<00:00, 686.13ba/s]
+   train: 100 samples (0.0 MB)
+
+✅ Dataset ready! 100 total (100 train, 0 eval)
+   Saved to /tmp/loft-arch-4YAapX/t5/prepared
+
+📊 Token statistics:
+   Train: 13,917 tokens (10,272 trainable)
+   Total: 13,917 tokens (10,272 trainable)
+
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 100 examples [00:00, 33188.04 examples/s]
+  0%|          | 0/3 [00:00<?, ?it/s]/home/aibox/.venv/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py:1181: UserWarning: torch.utils.checkpoint: the use_reentrant parameter should be passed explicitly. Starting in PyTorch 2.9, calling checkpoint without use_reentrant will raise an exception. use_reentrant=False is recommended, but if you need to preserve the current default behavior, you can pass use_reentrant=True. Refer to docs for more details on the differences between the two variants.
+  return fn(*args, **kwargs)
+ 33%|███▎      | 1/3 [00:00<00:01,  1.08it/s]                                              33%|███▎      | 1/3 [00:00<00:01,  1.08it/s] 67%|██████▋   | 2/3 [00:01<00:00,  1.44it/s]                                              67%|██████▋   | 2/3 [00:01<00:00,  1.44it/s]100%|██████████| 3/3 [00:01<00:00,  1.62it/s]                                             100%|██████████| 3/3 [00:01<00:00,  1.62it/s]                                             100%|██████████| 3/3 [00:01<00:00,  1.62it/s]100%|██████████| 3/3 [00:01<00:00,  1.51it/s]
+{'loss': '1.054', 'grad_norm': '1.779', 'learning_rate': '2e-05', 'entropy': '1.382', 'num_tokens': '142', 'mean_token_accuracy': '0.7429', 'epoch': '0.01'}
+{'loss': '1.047', 'grad_norm': '2.057', 'learning_rate': '2e-05', 'entropy': '1.393', 'num_tokens': '284', 'mean_token_accuracy': '0.7429', 'epoch': '0.02'}
+{'loss': '1.015', 'grad_norm': '1.647', 'learning_rate': '2e-05', 'entropy': '1.382', 'num_tokens': '426', 'mean_token_accuracy': '0.7333', 'epoch': '0.03'}
+{'train_runtime': '1.992', 'train_samples_per_second': '1.506', 'train_steps_per_second': '1.506', 'train_loss': '1.039', 'epoch': '0.03'}
+
+
+------------------------------------------------------------
+TEST 6: devstral-24b-qlora-mp
+Description: Devstral 24B, QLoRA, model_parallel across 2 GPUs
+Started: 2026-02-26 00:28:03 UTC
+Status: PASS
+Finished: 2026-02-26 00:28:49 UTC
+
+--- Last 30 lines of log ---
+  Loaded                      100
+  After preprocessing         100
+  Tokenize                    100
+  Truncation (truncate)       100  (truncated to 256 tokens)
+  Final (no eval)             100
+
+💾 Saving to /tmp/loft-arch-4YAapX/t6/prepared...
+Creating parquet from Arrow format:   0%|          | 0/1 [00:00<?, ?ba/s]Creating parquet from Arrow format: 100%|██████████| 1/1 [00:00<00:00, 679.68ba/s]
+   train: 100 samples (0.0 MB)
+
+✅ Dataset ready! 100 total (100 train, 0 eval)
+   Saved to /tmp/loft-arch-4YAapX/t6/prepared
+
+📊 Token statistics:
+   Train: 13,917 tokens (10,272 trainable)
+   Total: 13,917 tokens (10,272 trainable)
+
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 100 examples [00:00, 34219.66 examples/s]
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'eos_token_id': 2, 'bos_token_id': 1, 'pad_token_id': 11}.
+  0%|          | 0/3 [00:00<?, ?it/s]/home/aibox/.venv/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py:1181: UserWarning: torch.utils.checkpoint: the use_reentrant parameter should be passed explicitly. Starting in PyTorch 2.9, calling checkpoint without use_reentrant will raise an exception. use_reentrant=False is recommended, but if you need to preserve the current default behavior, you can pass use_reentrant=True. Refer to docs for more details on the differences between the two variants.
+  return fn(*args, **kwargs)
+/home/aibox/.venv/lib/python3.12/site-packages/torch/autograd/graph.py:865: UserWarning: The AccumulateGrad node's stream does not match the stream of the node that produced the incoming gradient. This may incur unnecessary synchronization and break CUDA graph capture if the AccumulateGrad node's stream is the default stream. This mismatch is caused by an AccumulateGrad node created prior to the current iteration being kept alive. This can happen if the autograd graph is still being kept alive by tensors such as the loss, or if you are using DDP, which will stash a reference to the node. To resolve the mismatch, delete all references to the autograd graph or ensure that DDP initialization is performed under the same stream as subsequent forwards. If the mismatch is intentional, you can use torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False) to suppress this warning. (Triggered internally at /pytorch/torch/csrc/autograd/input_buffer.cpp:240.)
+  return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+ 33%|███▎      | 1/3 [00:01<00:02,  1.34s/it]                                              33%|███▎      | 1/3 [00:01<00:02,  1.34s/it]Main CE loss is nan (ignored labels: 37/142). Replacing with 0 to prevent weight corruption.
+ 67%|██████▋   | 2/3 [00:02<00:01,  1.07s/it]                                              67%|██████▋   | 2/3 [00:02<00:01,  1.07s/it]Main CE loss is nan (ignored labels: 37/142). Replacing with 0 to prevent weight corruption.
+100%|██████████| 3/3 [00:03<00:00,  1.02it/s]                                             100%|██████████| 3/3 [00:03<00:00,  1.02it/s]                                             100%|██████████| 3/3 [00:03<00:00,  1.02it/s]100%|██████████| 3/3 [00:03<00:00,  1.03s/it]
+{'loss': '10.68', 'grad_norm': 'nan', 'learning_rate': '2e-05', 'entropy': '10.63', 'num_tokens': '142', 'mean_token_accuracy': '0', 'epoch': '0.01'}
+{'loss': '0', 'grad_norm': 'nan', 'learning_rate': '2e-05', 'entropy': 'nan', 'num_tokens': '284', 'mean_token_accuracy': '0', 'epoch': '0.02'}
+{'loss': '0', 'grad_norm': 'nan', 'learning_rate': '2e-05', 'entropy': 'nan', 'num_tokens': '426', 'mean_token_accuracy': '0', 'epoch': '0.03'}
+{'train_runtime': '3.099', 'train_samples_per_second': '0.968', 'train_steps_per_second': '0.968', 'train_loss': '3.559', 'epoch': '0.03'}
+
+
+------------------------------------------------------------
+TEST 7: moonlight-16b-deepseekv3-qlora
+Description: Moonlight 16B-A3B (DeepSeek V3 MoE), QLoRA, single GPU
+Started: 2026-02-26 00:28:53 UTC
+Status: FAIL (exit code 1)
+Finished: 2026-02-26 00:28:59 UTC
+
+--- Last 30 lines of log ---
+/home/aibox/.venv/lib/python3.12/site-packages/torch/cuda/__init__.py:65: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+warmup_ratio is deprecated and will be removed in v5.2. Use `warmup_steps` instead.
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/aibox/loft-t5/loft/scripts/sft.py", line 446, in <module>
+    main(script_args, training_args, model_args, dataset_args)
+  File "/home/aibox/loft-t5/loft/scripts/sft.py", line 184, in main
+    model = AutoModelForCausalLM.from_pretrained(model_args.model_name_or_path, **model_kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/aibox/.venv/lib/python3.12/site-packages/transformers/models/auto/auto_factory.py", line 356, in from_pretrained
+    model_class = get_class_from_dynamic_module(
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/aibox/.venv/lib/python3.12/site-packages/transformers/dynamic_module_utils.py", line 583, in get_class_from_dynamic_module
+    return get_class_in_module(class_name, final_module, force_reload=force_download)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/aibox/.venv/lib/python3.12/site-packages/transformers/dynamic_module_utils.py", line 309, in get_class_in_module
+    module_spec.loader.exec_module(module)
+  File "<frozen importlib._bootstrap_external>", line 995, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/home/aibox/.cache/huggingface/modules/transformers_modules/ce8bc137e6e29c3b7540ebdd515bbc5bdb20d915/modeling_deepseek.py", line 57, in <module>
+    from transformers.utils.import_utils import is_torch_fx_available
+ImportError: cannot import name 'is_torch_fx_available' from 'transformers.utils.import_utils' (/home/aibox/.venv/lib/python3.12/site-packages/transformers/utils/import_utils.py). Did you mean: 'is_torch_available'?
+
+
+------------------------------------------------------------
+TEST 8: liger-kernel
+Description: Qwen2-0.5B, LoRA, Liger kernel enabled
+Started: 2026-02-26 00:29:03 UTC
+Status: PASS
+Finished: 2026-02-26 00:29:18 UTC
+
+--- Last 30 lines of log ---
+Truncating:   0%|          | 0/100 [00:00<?, ? examples/s]Truncating: 100%|██████████| 100/100 [00:00<00:00, 3894.65 examples/s]
+   Truncate strategy: all samples capped at 256 tokens
+
+📊 No eval split requested.
+
+📊 Pipeline summary:
+  Loaded                      100
+  After preprocessing         100
+  Tokenize                    100
+  Truncation (truncate)       100  (truncated to 256 tokens)
+  Final (no eval)             100
+
+💾 Saving to /tmp/loft-arch-4YAapX/t8/prepared...
+Creating parquet from Arrow format:   0%|          | 0/1 [00:00<?, ?ba/s]Creating parquet from Arrow format: 100%|██████████| 1/1 [00:00<00:00, 641.13ba/s]
+   train: 100 samples (0.0 MB)
+
+✅ Dataset ready! 100 total (100 train, 0 eval)
+   Saved to /tmp/loft-arch-4YAapX/t8/prepared
+
+📊 Token statistics:
+   Train: 14,717 tokens (10,272 trainable)
+   Total: 14,717 tokens (10,272 trainable)
+
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 100 examples [00:00, 32668.46 examples/s]
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'bos_token_id': None, 'pad_token_id': 151643}.
+  0%|          | 0/3 [00:00<?, ?it/s] 33%|███▎      | 1/3 [00:01<00:03,  1.56s/it]                                              33%|███▎      | 1/3 [00:01<00:03,  1.56s/it] 67%|██████▋   | 2/3 [00:01<00:00,  1.28it/s]                                              67%|██████▋   | 2/3 [00:01<00:00,  1.28it/s]100%|██████████| 3/3 [00:02<00:00,  1.91it/s]                                             100%|██████████| 3/3 [00:02<00:00,  1.91it/s]                                             100%|██████████| 3/3 [00:02<00:00,  1.91it/s]100%|██████████| 3/3 [00:02<00:00,  1.49it/s]
+{'loss': '1.077', 'grad_norm': '1.916', 'learning_rate': '2e-05', 'num_tokens': '150', 'epoch': '0.01'}
+{'loss': '1.069', 'grad_norm': '1.928', 'learning_rate': '2e-05', 'num_tokens': '300', 'epoch': '0.02'}
+{'loss': '1.08', 'grad_norm': '1.907', 'learning_rate': '2e-05', 'num_tokens': '450', 'epoch': '0.03'}
+{'train_runtime': '2.015', 'train_samples_per_second': '1.489', 'train_steps_per_second': '1.489', 'train_loss': '1.075', 'epoch': '0.03'}
+
+
+------------------------------------------------------------
+TEST 9: packing-bfd
+Description: Qwen2-0.5B, LoRA, packing with BFD strategy
+Started: 2026-02-26 00:29:22 UTC
+Status: PASS
+Finished: 2026-02-26 00:29:36 UTC
+
+--- Last 30 lines of log ---
+📊 No eval split requested.
+
+📊 Pipeline summary:
+  Loaded                      100
+  After preprocessing         100
+  Tokenize                    100
+  Truncation (truncate)       100  (truncated to 256 tokens)
+  Final (no eval)             100
+
+💾 Saving to /tmp/loft-arch-4YAapX/t9/prepared...
+Creating parquet from Arrow format:   0%|          | 0/1 [00:00<?, ?ba/s]Creating parquet from Arrow format: 100%|██████████| 1/1 [00:00<00:00, 643.00ba/s]
+   train: 100 samples (0.0 MB)
+
+✅ Dataset ready! 100 total (100 train, 0 eval)
+   Saved to /tmp/loft-arch-4YAapX/t9/prepared
+
+📊 Token statistics:
+   Train: 14,717 tokens (10,272 trainable)
+   Total: 14,717 tokens (10,272 trainable)
+
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 100 examples [00:00, 28206.48 examples/s]
+Padding-free training is enabled, but the attention implementation is not set to a supported flash attention variant. Padding-free training flattens batches into a single sequence, and only the following implementations are known to reliably support this: flash_attention_2, flash_attention_3, kernels-community/flash-attn, kernels-community/flash-attn3, kernels-community/vllm-flash-attn3. Using other implementations may lead to unexpected behavior. To ensure compatibility, set `attn_implementation` in the model configuration to one of these supported options or verify that your attention mechanism can handle flattened sequences.
+You are using packing, but the attention implementation is not set to a supported flash attention variant. Packing gathers multiple samples into a single sequence, and only the following implementations are known to reliably support this: flash_attention_2, flash_attention_3, kernels-community/flash-attn, kernels-community/flash-attn3, kernels-community/vllm-flash-attn3. Using other implementations may lead to cross-contamination between samples. To avoid this, either disable packing by setting `packing=False`, or set `attn_implementation` in the model configuration to one of these supported options.
+Packing train dataset:   0%|          | 0/100 [00:00<?, ? examples/s]Packing train dataset: 100%|██████████| 100/100 [00:00<00:00, 23315.94 examples/s]
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'bos_token_id': None, 'pad_token_id': 151643}.
+  0%|          | 0/3 [00:00<?, ?it/s] 33%|███▎      | 1/3 [00:00<00:01,  1.55it/s]                                              33%|███▎      | 1/3 [00:00<00:01,  1.55it/s] 67%|██████▋   | 2/3 [00:00<00:00,  2.81it/s]                                              67%|██████▋   | 2/3 [00:00<00:00,  2.81it/s]100%|██████████| 3/3 [00:00<00:00,  3.54it/s]                                             100%|██████████| 3/3 [00:00<00:00,  3.54it/s]                                             100%|██████████| 3/3 [00:00<00:00,  3.54it/s]100%|██████████| 3/3 [00:00<00:00,  3.02it/s]
+{'loss': '1.118', 'grad_norm': '1.971', 'learning_rate': '2e-05', 'entropy': '1.114', 'num_tokens': '150', 'mean_token_accuracy': '0.6857', 'epoch': '0.0101'}
+{'loss': '1.047', 'grad_norm': '1.945', 'learning_rate': '2e-05', 'entropy': '1.095', 'num_tokens': '296', 'mean_token_accuracy': '0.6863', 'epoch': '0.0202'}
+{'loss': '1.29', 'grad_norm': '2.126', 'learning_rate': '2e-05', 'entropy': '1.24', 'num_tokens': '549', 'mean_token_accuracy': '0.6316', 'epoch': '0.0303'}
+{'train_runtime': '0.9955', 'train_samples_per_second': '3.014', 'train_steps_per_second': '3.014', 'train_loss': '1.152', 'epoch': '0.0303'}
+
+
+------------------------------------------------------------
+TEST 10: liger-fsdp
+Description: Qwen2-0.5B, LoRA, Liger kernel, FSDP 2 GPUs
+Started: 2026-02-26 00:29:40 UTC
+Status: PASS
+Finished: 2026-02-26 00:30:12 UTC
+
+--- Last 30 lines of log ---
+   Truncate strategy: all samples capped at 256 tokens
+
+📊 No eval split requested.
+
+📊 Pipeline summary:
+  Loaded                      100
+  After preprocessing         100
+  Tokenize                    100
+  Truncation (truncate)       100  (truncated to 256 tokens)
+  Final (no eval)             100
+
+💾 Saving to /tmp/loft-arch-4YAapX/t10/prepared...
+Creating parquet from Arrow format:   0%|          | 0/1 [00:00<?, ?ba/s]Creating parquet from Arrow format: 100%|██████████| 1/1 [00:00<00:00, 632.72ba/s]
+   train: 100 samples (0.0 MB)
+
+✅ Dataset ready! 100 total (100 train, 0 eval)
+   Saved to /tmp/loft-arch-4YAapX/t10/prepared
+
+📊 Token statistics:
+   Train: 14,717 tokens (10,272 trainable)
+   Total: 14,717 tokens (10,272 trainable)
+
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 100 examples [00:00, 32441.05 examples/s]
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'bos_token_id': None, 'pad_token_id': 151643}.
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'bos_token_id': None, 'pad_token_id': 151643}.
+  0%|          | 0/3 [00:00<?, ?it/s] 33%|███▎      | 1/3 [00:01<00:02,  1.30s/it]                                             {'loss': '1.072', 'grad_norm': '1.873', 'learning_rate': '2e-05', 'num_tokens': '300', 'epoch': '0.02'}
+ 33%|███▎      | 1/3 [00:01<00:02,  1.30s/it] 67%|██████▋   | 2/3 [00:01<00:00,  1.15it/s]                                             {'loss': '1.072', 'grad_norm': '1.882', 'learning_rate': '2e-05', 'num_tokens': '600', 'epoch': '0.04'}
+ 67%|██████▋   | 2/3 [00:01<00:00,  1.15it/s]100%|██████████| 3/3 [00:02<00:00,  1.39it/s]                                             {'loss': '1.066', 'grad_norm': '1.858', 'learning_rate': '2e-05', 'num_tokens': '900', 'epoch': '0.06'}
+100%|██████████| 3/3 [00:02<00:00,  1.39it/s]                                             {'train_runtime': '2.432', 'train_samples_per_second': '2.467', 'train_steps_per_second': '1.233', 'train_loss': '1.07', 'epoch': '0.06'}
+100%|██████████| 3/3 [00:02<00:00,  1.39it/s]100%|██████████| 3/3 [00:02<00:00,  1.24it/s]
+
+
+------------------------------------------------------------
+TEST 11: qwen3-vl-2b-fsdp
+Description: Qwen3-VL 2B (multimodal), LoRA, FSDP 2 GPUs
+Started: 2026-02-26 00:30:15 UTC
+Status: PASS
+Finished: 2026-02-26 00:31:35 UTC
+
+--- Last 30 lines of log ---
+   Truncate strategy: all samples capped at 256 tokens
+
+📊 No eval split requested.
+
+📊 Pipeline summary:
+  Loaded                      100
+  After preprocessing         100
+  Tokenize                    100
+  Truncation (truncate)       100  (truncated to 256 tokens)
+  Final (no eval)             100
+
+💾 Saving to /tmp/loft-arch-4YAapX/t11/prepared...
+Creating parquet from Arrow format:   0%|          | 0/1 [00:00<?, ?ba/s]Creating parquet from Arrow format: 100%|██████████| 1/1 [00:00<00:00, 630.53ba/s]
+   train: 100 samples (0.0 MB)
+
+✅ Dataset ready! 100 total (100 train, 0 eval)
+   Saved to /tmp/loft-arch-4YAapX/t11/prepared
+
+📊 Token statistics:
+   Train: 14,717 tokens (10,272 trainable)
+   Total: 14,717 tokens (10,272 trainable)
+
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 100 examples [00:00, 33380.85 examples/s]
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'eos_token_id': 151645, 'bos_token_id': None, 'pad_token_id': 151643}.
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'eos_token_id': 151645, 'bos_token_id': None, 'pad_token_id': 151643}.
+  0%|          | 0/3 [00:00<?, ?it/s] 33%|███▎      | 1/3 [00:02<00:05,  2.66s/it]                                             {'loss': '1.367', 'grad_norm': '5.804', 'learning_rate': '2e-05', 'entropy': '0.6264', 'num_tokens': '300', 'mean_token_accuracy': '0.7095', 'epoch': '0.02'}
+ 33%|███▎      | 1/3 [00:02<00:05,  2.66s/it] 67%|██████▋   | 2/3 [00:04<00:02,  2.14s/it]                                             {'loss': '1.382', 'grad_norm': '5.775', 'learning_rate': '2e-05', 'entropy': '0.6416', 'num_tokens': '600', 'mean_token_accuracy': '0.7143', 'epoch': '0.04'}
+ 67%|██████▋   | 2/3 [00:04<00:02,  2.14s/it]100%|██████████| 3/3 [00:06<00:00,  1.97s/it]                                             {'loss': '1.34', 'grad_norm': '5.582', 'learning_rate': '2e-05', 'entropy': '0.6375', 'num_tokens': '900', 'mean_token_accuracy': '0.7143', 'epoch': '0.06'}
+100%|██████████| 3/3 [00:06<00:00,  1.97s/it]                                             {'train_runtime': '6.229', 'train_samples_per_second': '0.963', 'train_steps_per_second': '0.482', 'train_loss': '1.363', 'epoch': '0.06'}
+100%|██████████| 3/3 [00:06<00:00,  1.97s/it]100%|██████████| 3/3 [00:06<00:00,  2.07s/it]
+
+
+------------------------------------------------------------
+TEST 12: qwen35-27b-qlora-mp
+Description: Qwen3.5 27B (hybrid attention), QLoRA, model_parallel across 2 GPUs
+Started: 2026-02-26 00:31:39 UTC
+Status: PASS
+Finished: 2026-02-26 00:32:19 UTC
+
+--- Last 30 lines of log ---
+
+📊 Pipeline summary:
+  Loaded                      100
+  After preprocessing         100
+  Tokenize                    100
+  Truncation (truncate)       100  (truncated to 256 tokens)
+  Final (no eval)             100
+
+💾 Saving to /tmp/loft-arch-4YAapX/t12/prepared...
+Creating parquet from Arrow format:   0%|          | 0/1 [00:00<?, ?ba/s]Creating parquet from Arrow format: 100%|██████████| 1/1 [00:00<00:00, 661.46ba/s]
+   train: 100 samples (0.0 MB)
+
+✅ Dataset ready! 100 total (100 train, 0 eval)
+   Saved to /tmp/loft-arch-4YAapX/t12/prepared
+
+📊 Token statistics:
+   Train: 15,417 tokens (10,772 trainable)
+   Total: 15,417 tokens (10,772 trainable)
+
+Generating train split: 0 examples [00:00, ? examples/s]Generating train split: 100 examples [00:00, 26730.64 examples/s]
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'eos_token_id': 248046, 'bos_token_id': None, 'pad_token_id': 248044}.
+  0%|          | 0/3 [00:00<?, ?it/s]/home/aibox/.venv/lib/python3.12/site-packages/torch/_dynamo/eval_frame.py:1181: UserWarning: torch.utils.checkpoint: the use_reentrant parameter should be passed explicitly. Starting in PyTorch 2.9, calling checkpoint without use_reentrant will raise an exception. use_reentrant=False is recommended, but if you need to preserve the current default behavior, you can pass use_reentrant=True. Refer to docs for more details on the differences between the two variants.
+  return fn(*args, **kwargs)
+/home/aibox/.venv/lib/python3.12/site-packages/torch/autograd/graph.py:865: UserWarning: The AccumulateGrad node's stream does not match the stream of the node that produced the incoming gradient. This may incur unnecessary synchronization and break CUDA graph capture if the AccumulateGrad node's stream is the default stream. This mismatch is caused by an AccumulateGrad node created prior to the current iteration being kept alive. This can happen if the autograd graph is still being kept alive by tensors such as the loss, or if you are using DDP, which will stash a reference to the node. To resolve the mismatch, delete all references to the autograd graph or ensure that DDP initialization is performed under the same stream as subsequent forwards. If the mismatch is intentional, you can use torch.autograd.graph.set_warn_on_accumulate_grad_stream_mismatch(False) to suppress this warning. (Triggered internally at /pytorch/torch/csrc/autograd/input_buffer.cpp:240.)
+  return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+ 33%|███▎      | 1/3 [00:03<00:07,  3.72s/it]                                              33%|███▎      | 1/3 [00:03<00:07,  3.72s/it] 67%|██████▋   | 2/3 [00:06<00:03,  3.05s/it]                                              67%|██████▋   | 2/3 [00:06<00:03,  3.05s/it]100%|██████████| 3/3 [00:08<00:00,  2.82s/it]                                             100%|██████████| 3/3 [00:08<00:00,  2.82s/it]                                             100%|██████████| 3/3 [00:08<00:00,  2.82s/it]100%|██████████| 3/3 [00:08<00:00,  2.95s/it]
+{'loss': '0.9657', 'grad_norm': '0.9928', 'learning_rate': '2e-05', 'entropy': '0.8045', 'num_tokens': '157', 'mean_token_accuracy': '0.7727', 'epoch': '0.01'}
+{'loss': '0.951', 'grad_norm': '0.9717', 'learning_rate': '2e-05', 'entropy': '0.7982', 'num_tokens': '314', 'mean_token_accuracy': '0.7818', 'epoch': '0.02'}
+{'loss': '0.9737', 'grad_norm': '1.028', 'learning_rate': '2e-05', 'entropy': '0.8164', 'num_tokens': '471', 'mean_token_accuracy': '0.7636', 'epoch': '0.03'}
+{'train_runtime': '8.865', 'train_samples_per_second': '0.338', 'train_steps_per_second': '0.338', 'train_loss': '0.9635', 'epoch': '0.03'}
+
+
+================================================================
+SUMMARY
+================================================================
+TEST 1: qwen3-0.6b-lora	=> PASS
+TEST 2: qwen3-vl-2b-lora	=> PASS
+TEST 3: voxtral-3b-lora	=> PASS
+TEST 4: trinity-nano-scm-lora	=> PASS
+TEST 5: ministral3-14b-qlora	=> PASS
+TEST 6: devstral-24b-qlora-mp	=> PASS
+TEST 7: moonlight-16b-deepseekv3-qlora	=> FAIL (exit code 1)
+TEST 8: liger-kernel	=> PASS
+TEST 9: packing-bfd	=> PASS
+TEST 10: liger-fsdp	=> PASS
+TEST 11: qwen3-vl-2b-fsdp	=> PASS
+TEST 12: qwen35-27b-qlora-mp	=> PASS
+
+Work dir (full logs): /tmp/loft-arch-4YAapX

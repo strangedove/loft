@@ -104,6 +104,46 @@ When a LoRA adapter is detected, eval generates with both the LoRA and the base 
 
 Outputs `{prefix}.json` (raw results) and `{prefix}.md` (human-readable markdown).
 
+## Multi-GPU training
+
+Loft supports multi-GPU training via FSDP and DeepSpeed ZeRO, passed as an accelerate config:
+
+```bash
+loft train train.yaml --accelerate_config fsdp.yaml
+loft train train.yaml --accelerate_config ds_zero2.yaml
+```
+
+### Compatibility matrix
+
+Tested with Transformers 5.x, PEFT 0.15, Accelerate 1.12, DeepSpeed 0.18.
+
+| Method | FSDP | DeepSpeed ZeRO-2 | DeepSpeed ZeRO-3 |
+|--------|------|------------------|------------------|
+| Full fine-tuning | yes | yes | yes |
+| LoRA | yes | yes | yes (no grad ckpt) |
+| QLoRA (4-bit) | no | yes | no |
+
+**Notes:**
+- **QLoRA + FSDP**: Incompatible. FSDP requires uniform dtypes; QLoRA mixes bf16/int4.
+- **QLoRA + ZeRO-3**: Incompatible. ZeRO-3 manages its own parameter partitioning and conflicts with bitsandbytes' `device_map`.
+- **LoRA + ZeRO-3**: Works, but requires `gradient_checkpointing: false`. ZeRO-3's parameter gather/partition cycle causes metadata mismatches during gradient checkpointing recomputation.
+
+### Tested architectures
+
+| Architecture | Example model | LoRA | QLoRA | Multimodal | Notes |
+|-------------|---------------|------|-------|------------|-------|
+| Qwen2 | Qwen2-0.5B | yes | yes | n/a | |
+| Qwen3 | Qwen3-0.6B | yes | — | n/a | |
+| Qwen3-VL | Qwen3-VL-2B-Instruct | yes | — | text-only SFT | Single GPU + FSDP |
+| Mistral | Voxtral-Mini-3B | yes | — | n/a | |
+| AfmoeSCM (MoE) | Trinity-Nano-Preview-SCM | yes | — | n/a | ScatterMoE, trust_remote_code |
+| Ministral3 | Ministral-3-14B | — | yes | n/a | Text-only Mistral3-family |
+| Mistral3 | Devstral-24B | — | yes | text-only SFT | QLoRA + model_parallel (2 GPUs) |
+
+**Features tested:** Liger kernel, packing (BFD), Liger + FSDP, multimodal + FSDP.
+
+**Large model support:** Models that don't fit on a single GPU can use `model_parallel: true` with QLoRA to distribute across multiple GPUs via `device_map`. FP8-quantized models (e.g. Devstral) are automatically re-quantized to 4-bit when `load_in_4bit` is set.
+
 ## Config inheritance
 
 Training configs support a `base_config` field that loads defaults from another YAML file. Child values override base values. Chains are supported (a base can reference its own base).

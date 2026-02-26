@@ -28,6 +28,7 @@ from accelerate import PartialState, logging
 from datasets import Dataset, IterableDataset
 from transformers import (
     AutoProcessor,
+    AutoTokenizer,
     BaseImageProcessor,
     DataCollator,
     FeatureExtractionMixin,
@@ -1013,7 +1014,12 @@ class SFTTrainer(BaseTrainer):
         # Processing class
         if processing_class is None:
             trust_remote_code = getattr(model.config, "auto_map", None) is not None
-            processing_class = AutoProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+            try:
+                processing_class = AutoProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+            except (OSError, ValueError):
+                # Some models (e.g. text-only Ministral3) have multimodal-family configs
+                # but lack image processor files.  Fall back to tokenizer-only.
+                processing_class = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust_remote_code)
 
         # Handle pad token for processors or tokenizers
         if isinstance(processing_class, ProcessorMixin):
@@ -2405,6 +2411,8 @@ class SFTTrainer(BaseTrainer):
 
         # Guard: if the main CE loss is NaN/Inf (e.g. from bf16 overflow in Liger kernel),
         # replace with zero to skip this batch and prevent LoRA weight corruption.
+        # Use `torch.where` instead of `new_zeros` to preserve the computation graph
+        # (DeepSpeed requires grad_fn on the loss tensor for backward).
         if not torch.isfinite(loss):
             n_ignore = (labels == -100).sum().item()
             n_total = labels.numel()
@@ -2412,7 +2420,7 @@ class SFTTrainer(BaseTrainer):
                 f"Main CE loss is {loss.item():.4f} (ignored labels: {n_ignore}/{n_total}). "
                 f"Replacing with 0 to prevent weight corruption."
             )
-            loss = loss.new_zeros((), requires_grad=True)
+            loss = torch.where(torch.isfinite(loss), loss, torch.zeros_like(loss))
 
         # Add MoE router load-balancing auxiliary loss to the training objective
         if self.aux_loss_enabled and self.aux_loss_coef > 0:
@@ -2634,7 +2642,7 @@ class SFTTrainer(BaseTrainer):
 
             with deepspeed.zero.GatheredParameters(trainable_params):
                 if self.args.should_save:
-                    unwrapped.save_pretrained(output_dir, safe_serialization=self.args.save_safetensors)
+                    unwrapped.save_pretrained(output_dir, safe_serialization=getattr(self.args, "save_safetensors", True))
 
             # Save tokenizer / processor on main process
             if self.args.should_save:

@@ -543,14 +543,29 @@ def prepare_peft_model(
 
     # Create PEFT model
     if peft_config is not None:
-        if (
-            version.parse(peft.__version__) >= version.parse("0.12")  # autocast_adapter_dtype introduced in 0.12
-            and getattr(model, "is_loaded_in_4bit", False)
-            and is_sharded_qlora
-        ):
-            model = get_peft_model(model, peft_config, autocast_adapter_dtype=False)
-        else:
-            model = get_peft_model(model, peft_config)
+        # PEFT can't auto-detect target_modules for some model architectures
+        # (e.g. VL models, Ministral3). Pre-set "all-linear" for known cases,
+        # and catch + retry for any others.
+        if getattr(peft_config, "target_modules", None) is None and hasattr(model.config, "text_config"):
+            peft_config.target_modules = "all-linear"
+
+        def _get_peft(model, peft_config):
+            if (
+                version.parse(peft.__version__) >= version.parse("0.12")
+                and getattr(model, "is_loaded_in_4bit", False)
+                and is_sharded_qlora
+            ):
+                return get_peft_model(model, peft_config, autocast_adapter_dtype=False)
+            return get_peft_model(model, peft_config)
+
+        try:
+            model = _get_peft(model, peft_config)
+        except ValueError as e:
+            if "target_modules" in str(e) and getattr(peft_config, "target_modules", None) is None:
+                peft_config.target_modules = "all-linear"
+                model = _get_peft(model, peft_config)
+            else:
+                raise
 
     # Handle bf16 casting for 4-bit models
     if args.bf16 and getattr(model, "is_loaded_in_4bit", False) and not is_sharded_qlora:
