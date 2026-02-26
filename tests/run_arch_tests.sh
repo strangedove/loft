@@ -46,7 +46,7 @@ resolve_model() {
 if [ $# -gt 0 ]; then
     TESTS_TO_RUN=("$@")
 else
-    TESTS_TO_RUN=(1 2 3 4 5 6 7 8 9 10 11 12)
+    TESTS_TO_RUN=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
 fi
 
 echo "================================================================"
@@ -357,8 +357,48 @@ model_parallel: true"
                 "$PYTHON -m loft.scripts.sft $DIR/train.yaml"
             ;;
 
+        13) # Qwen3.5-27B + Liger kernel — verifies custom Liger patching for hybrid arch
+            MODEL=$(resolve_model "Qwen/Qwen3.5-27B")
+            if [ -z "$MODEL" ]; then echo "SKIP test 13: Qwen3.5-27B not in cache"; continue; fi
+            DIR="$WORK_DIR/t13"; mkdir -p "$DIR"
+            write_data_config "$DIR"
+            write_train_config "$DIR" "$MODEL" "load_in_4bit: true
+model_parallel: true
+use_liger_kernel: true"
+            run_test 13 "qwen35-27b-qlora-mp-liger" \
+                "Qwen3.5 27B (hybrid attention), QLoRA, model_parallel, Liger kernel" \
+                "$PYTHON -m loft.scripts.sft $DIR/train.yaml"
+            ;;
+
+        14) # Auxiliary losses (all enabled) with Qwen2-0.5B — no Liger
+            DIR="$WORK_DIR/t14"; mkdir -p "$DIR"
+            write_data_config "$DIR"
+            write_train_config "$DIR" "$QWEN05B" "assistant_only_loss: true
+aux_loss_eos_weight: 0.1
+aux_loss_rep_weight: 0.01
+aux_loss_top_prob_weight: 0.01
+label_smoothing: 0.1"
+            run_test 14 "aux-losses-all" \
+                "Qwen2-0.5B, LoRA, all auxiliary losses + label smoothing" \
+                "CUDA_VISIBLE_DEVICES=0 $PYTHON -m loft.scripts.sft $DIR/train.yaml"
+            ;;
+
+        15) # Auxiliary losses (all enabled) with Qwen2-0.5B + Liger kernel
+            DIR="$WORK_DIR/t15"; mkdir -p "$DIR"
+            write_data_config "$DIR"
+            write_train_config "$DIR" "$QWEN05B" "assistant_only_loss: true
+use_liger_kernel: true
+aux_loss_eos_weight: 0.1
+aux_loss_rep_weight: 0.01
+aux_loss_top_prob_weight: 0.01
+label_smoothing: 0.1"
+            run_test 15 "aux-losses-all-liger" \
+                "Qwen2-0.5B, LoRA, all auxiliary losses + label smoothing + Liger" \
+                "CUDA_VISIBLE_DEVICES=0 $PYTHON -m loft.scripts.sft $DIR/train.yaml"
+            ;;
+
         *)
-            echo "Unknown test number: $test_num (valid: 1-12)"
+            echo "Unknown test number: $test_num (valid: 1-15)"
             ;;
     esac
 done

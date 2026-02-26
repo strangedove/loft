@@ -250,6 +250,116 @@ def main(script_args, training_args, model_args, dataset_args):
                     mod.apply_lce = _device_aligned_apply_lce
             logger.info("Patched CCE apply_lce for model_parallel device alignment.")
 
+    # Apply Liger kernel patches for model types not yet in Liger's registry.
+    # Qwen3.5 uses the same RMSNorm pattern as Qwen3Next (zero-init, offset=1.0)
+    # and standard SwiGLU MLPs.  Linear attention layers are left as-is.
+    model_type = getattr(config, "model_type", None)
+    if training_args.use_liger_kernel and model_type in ("qwen3_5", "qwen3_5_moe"):
+        try:
+            from liger_kernel.transformers.monkey_patch import MODEL_TYPE_TO_APPLY_LIGER_FN
+            from liger_kernel.transformers.rms_norm import LigerRMSNorm
+            from liger_kernel.transformers.swiglu import LigerSwiGLUMLP
+
+            # Register a no-op so HF Trainer doesn't warn about unsupported model type
+            if model_type not in MODEL_TYPE_TO_APPLY_LIGER_FN:
+                MODEL_TYPE_TO_APPLY_LIGER_FN[model_type] = lambda **kwargs: None
+
+            def _hook_aware_bind(module, method_name, new_method):
+                """Bind a method to a module, respecting accelerate dispatch hooks.
+
+                When accelerate's dispatch_model installs hooks, it saves the original
+                forward as module._old_forward and replaces forward with a wrapper that
+                handles device placement.  If we naively replace forward, we lose the
+                hook.  Instead, patch _old_forward so the hook wrapper calls our new
+                method with proper device context.
+                """
+                bound = new_method.__get__(module, module.__class__)
+                if method_name == "forward" and hasattr(module, "_old_forward"):
+                    module._old_forward = bound
+                else:
+                    module.__dict__[method_name] = bound
+
+            # When using model_parallel, Triton kernels launch on torch.cuda.current_device()
+            # but accelerate hooks only move tensors — they don't switch the CUDA context.
+            # We wrap the Liger forward to set the correct CUDA device before the kernel runs.
+            _needs_device_ctx = model_args.model_parallel
+
+            _liger_rms_forward = LigerRMSNorm.forward
+            _liger_swiglu_forward = LigerSwiGLUMLP.forward
+
+            if _needs_device_ctx:
+                import torch as _torch_liger
+
+                def _device_ctx_rms_forward(self, hidden_states):
+                    prev = _torch_liger.cuda.current_device()
+                    target = hidden_states.device
+                    if target.type == "cuda" and target.index != prev:
+                        _torch_liger.cuda.set_device(target)
+                    try:
+                        return _liger_rms_forward(self, hidden_states)
+                    finally:
+                        if target.type == "cuda" and target.index != prev:
+                            _torch_liger.cuda.set_device(prev)
+
+                def _device_ctx_swiglu_forward(self, x):
+                    prev = _torch_liger.cuda.current_device()
+                    target = x.device
+                    if target.type == "cuda" and target.index != prev:
+                        _torch_liger.cuda.set_device(target)
+                    try:
+                        return _liger_swiglu_forward(self, x)
+                    finally:
+                        if target.type == "cuda" and target.index != prev:
+                            _torch_liger.cuda.set_device(prev)
+
+                _rms_forward_to_use = _device_ctx_rms_forward
+                _swiglu_forward_to_use = _device_ctx_swiglu_forward
+            else:
+                _rms_forward_to_use = _liger_rms_forward
+                _swiglu_forward_to_use = _liger_swiglu_forward
+
+            def _patch_norm(module):
+                """Patch a Qwen3.5 RMSNorm module with Liger's Triton kernel."""
+                module.offset = 1.0
+                module.casting_mode = "gemma"
+                module.variance_epsilon = getattr(module, "variance_epsilon", None) or getattr(module, "eps", None) or 1e-6
+                module.in_place = False  # in_place=False is safer with gradient checkpointing
+                module.row_mode = None
+                _hook_aware_bind(module, "forward", _rms_forward_to_use)
+
+            # Navigate to the text model inside the composite wrapper
+            base = model
+            if hasattr(base, "model") and hasattr(base.model, "language_model"):
+                base = base.model.language_model  # Qwen3_5ForConditionalGeneration → text model
+            elif hasattr(base, "model"):
+                base = base.model
+
+            # Patch final norm
+            if hasattr(base, "norm"):
+                _patch_norm(base.norm)
+
+            # Patch decoder layers: RMSNorm and SwiGLU MLP (skip linear attention modules)
+            n_patched_norm = 0
+            n_patched_mlp = 0
+            for layer in getattr(base, "layers", []):
+                if hasattr(layer, "input_layernorm"):
+                    _patch_norm(layer.input_layernorm)
+                    n_patched_norm += 1
+                if hasattr(layer, "post_attention_layernorm"):
+                    _patch_norm(layer.post_attention_layernorm)
+                    n_patched_norm += 1
+                if hasattr(layer, "mlp"):
+                    _hook_aware_bind(layer.mlp, "forward", _swiglu_forward_to_use)
+                    n_patched_mlp += 1
+
+            logger.info(
+                f"Applied Liger kernel patches to {model_type}: "
+                f"{n_patched_norm} RMSNorm, {n_patched_mlp} SwiGLU MLP modules patched. "
+                f"Linear attention layers left as-is."
+            )
+        except ImportError:
+            logger.warning("Liger kernel requested but import failed — skipping Qwen3.5 patches.")
+
     # Patch CAME optimizer for model_parallel device alignment:
     # Triton kernels launch on the current CUDA device, so we must switch
     # context to match each parameter's device before running the step.
