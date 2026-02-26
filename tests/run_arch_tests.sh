@@ -46,7 +46,7 @@ resolve_model() {
 if [ $# -gt 0 ]; then
     TESTS_TO_RUN=("$@")
 else
-    TESTS_TO_RUN=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
+    TESTS_TO_RUN=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)
 fi
 
 echo "================================================================"
@@ -397,8 +397,21 @@ label_smoothing: 0.1"
                 "CUDA_VISIBLE_DEVICES=0 $PYTHON -m loft.scripts.sft $DIR/train.yaml"
             ;;
 
+        16) # Qwen3.5-27B + CCE — verifies VL model type dispatch fix
+            MODEL=$(resolve_model "Qwen/Qwen3.5-27B")
+            if [ -z "$MODEL" ]; then echo "SKIP test 16: Qwen3.5-27B not in cache"; continue; fi
+            DIR="$WORK_DIR/t16"; mkdir -p "$DIR"
+            write_data_config "$DIR"
+            write_train_config "$DIR" "$MODEL" "load_in_4bit: true
+model_parallel: true
+use_cce: true"
+            run_test 16 "qwen35-27b-qlora-mp-cce" \
+                "Qwen3.5 27B (hybrid attention), QLoRA, model_parallel, CCE" \
+                "$PYTHON -m loft.scripts.sft $DIR/train.yaml"
+            ;;
+
         *)
-            echo "Unknown test number: $test_num (valid: 1-15)"
+            echo "Unknown test number: $test_num (valid: 1-16)"
             ;;
     esac
 done

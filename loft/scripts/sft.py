@@ -209,7 +209,22 @@ def main(script_args, training_args, model_args, dataset_args):
                 "Try: pip install --upgrade cut-cross-entropy transformers"
             ) from e
 
-        model = cce_patch(model)
+        # CCE dispatches by config.model_type, but composite VL models (e.g. Qwen3.5's
+        # ForConditionalGeneration) need the "_vl" patch variant.  Detect this and
+        # temporarily override model_type so cce_patch routes to the correct function.
+        _original_model_type = getattr(model.config, "model_type", None)
+        _cce_needs_vl = False
+        if _original_model_type and "ForConditionalGeneration" in type(model).__name__:
+            _vl_key = _original_model_type + "_vl"
+            from cut_cross_entropy.transformers.patch import PATCH_FNS
+            if _vl_key in PATCH_FNS:
+                model.config.model_type = _vl_key
+                _cce_needs_vl = True
+        try:
+            model = cce_patch(model)
+        finally:
+            if _cce_needs_vl:
+                model.config.model_type = _original_model_type
         logger.info("Applied CCE (Cut Cross-Entropy) patch for memory-efficient loss computation.")
 
         # When using model_parallel (device_map="auto"), the lm_head weight and hidden states
