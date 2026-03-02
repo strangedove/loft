@@ -59,8 +59,20 @@ def _load_adapter_config(lora_path: Path) -> dict:
         return json.load(f)
 
 
-def _compute_scale(adapter_config: dict, weight_override: Optional[float] = None) -> float:
-    """Compute the LoRA scaling factor from adapter config."""
+def _compute_scale(
+    adapter_config: dict,
+    weight: Optional[float] = None,
+    scale_override: Optional[float] = None,
+) -> float:
+    """Compute the LoRA scaling factor.
+
+    Base scale is alpha/r (or alpha/sqrt(r) for rslora) from the adapter config.
+    ``weight`` multiplies the base scale (e.g. 0.5 = half strength).
+    ``scale_override`` replaces the base scale entirely.
+    """
+    if scale_override is not None:
+        return scale_override
+
     alpha = adapter_config["lora_alpha"]
     r = adapter_config["r"]
     use_rslora = adapter_config.get("use_rslora", False)
@@ -70,8 +82,8 @@ def _compute_scale(adapter_config: dict, weight_override: Optional[float] = None
     else:
         scale = alpha / r
 
-    if weight_override is not None:
-        scale *= weight_override
+    if weight is not None:
+        scale *= weight
 
     return scale
 
@@ -100,6 +112,7 @@ def merge(
     lora_path: str | Path,
     output_path: str | Path,
     weight: Optional[float] = None,
+    scale: Optional[float] = None,
     use_gpu: bool = True,
 ) -> Path:
     """Merge a LoRA adapter into a base model, shard by shard.
@@ -111,6 +124,8 @@ def merge(
         weight: Optional multiplier on the LoRA scale factor.
             None = use the scale from adapter_config (alpha/r or alpha/sqrt(r)).
             1.0 = same as None. 0.5 = half strength. 2.0 = double strength.
+        scale: Optional direct scale factor, replacing the adapter config value.
+            Mutually exclusive with weight.
         use_gpu: Use CUDA for merge computation if available.
 
     Returns:
@@ -122,8 +137,13 @@ def merge(
     os.makedirs(output_path, exist_ok=True)
 
     adapter_config = _load_adapter_config(lora_path)
-    scale = _compute_scale(adapter_config, weight)
-    logger.info(f"LoRA scale factor: {scale:.4f}" + (f" (weight={weight})" if weight is not None else ""))
+    effective_scale = _compute_scale(adapter_config, weight=weight, scale_override=scale)
+    if scale is not None:
+        logger.info(f"LoRA scale factor: {effective_scale:.4f} (explicit --scale)")
+    elif weight is not None:
+        logger.info(f"LoRA scale factor: {effective_scale:.4f} (base * weight={weight})")
+    else:
+        logger.info(f"LoRA scale factor: {effective_scale:.4f} (from adapter config)")
 
     device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
 
@@ -177,7 +197,7 @@ def merge(
                     found += 1
                     old_dtype = tensor.dtype
                     tensor = tensor.to(torch.float32)
-                    tensor += scale * lora_B.to(torch.float32) @ lora_A.to(torch.float32)
+                    tensor += effective_scale * lora_B.to(torch.float32) @ lora_A.to(torch.float32)
                     tensor = tensor.to(old_dtype)
                 tensors[key] = tensor
 
@@ -287,7 +307,13 @@ def make_parser(subparsers: Optional[argparse._SubParsersAction] = None):
         "--weight",
         type=float,
         default=None,
-        help="Multiplier on LoRA scale factor (default: 1.0, i.e. use adapter config as-is)",
+        help="Multiplier on the adapter's scale factor (e.g. 0.5 = half strength, 2.0 = double)",
+    )
+    parser.add_argument(
+        "--scale",
+        type=float,
+        default=None,
+        help="Direct scale factor, replacing the adapter config value entirely",
     )
     parser.add_argument(
         "--no-gpu",
@@ -304,6 +330,9 @@ def main(args):
         level=logging.INFO,
         format="%(message)s",
     )
+
+    if args.weight is not None and args.scale is not None:
+        raise SystemExit("Error: --weight and --scale are mutually exclusive.")
 
     if args.config:
         base_model, lora_path, default_output = _resolve_from_config(
@@ -341,5 +370,6 @@ def main(args):
         lora_path=lora_path,
         output_path=output_path,
         weight=args.weight,
+        scale=args.scale,
         use_gpu=not args.no_gpu,
     )
