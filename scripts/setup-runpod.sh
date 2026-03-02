@@ -39,6 +39,10 @@ echo "📦 Installing loft and dependencies..."
 cd /workspace/loft
 uv sync
 
+# Apply fla Triton kernel patch (fixes GatedDeltaNet backward pass for Qwen3.5)
+echo "🔧 Applying flash-linear-attention patches..."
+uv run python -c "from loft.patches.fla_triton import patch_fla_wy_fast; patch_fla_wy_fast()" || echo "⚠️  fla patch skipped (non-fatal)"
+
 # Install flash-attn (often needed, compile can take a while)
 echo "⚡ Installing flash-attention..."
 uv pip install flash-attn --no-build-isolation || echo "⚠️  flash-attn install failed (may need manual install)"

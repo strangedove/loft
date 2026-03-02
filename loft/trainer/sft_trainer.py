@@ -1637,7 +1637,14 @@ class SFTTrainer(BaseTrainer):
             logits = nn.functional.linear(h_ck.to(w_ck.dtype), w_ck).float()  # upcast for numerical stability
             # Clamp extreme logit values to prevent NaN in softmax/log_softmax
             logits = logits.clamp(min=-1e4, max=1e4)
-            loss = torch.tensor(0.0, device=h_ck.device)
+            # Align labels and masks to logits device (may differ under model_parallel)
+            dev = logits.device
+            l_ck = l_ck.to(dev)
+            m_ck = m_ck.to(dev)
+            if te_ck is not None:
+                te_ck = te_ck.to(dev)
+            N_dev = N.to(dev)  # closure-captured N may be on a different GPU
+            loss = torch.tensor(0.0, device=dev)
             n_valid = m_ck.sum()
             if n_valid == 0:
                 return loss
@@ -1650,14 +1657,14 @@ class SFTTrainer(BaseTrainer):
                 nll = nn.functional.cross_entropy(
                     logits, l_ck, ignore_index=-100, reduction="none"
                 )
-                correction = ls_alpha * ((uniform_ce - nll) * m_ck.float()).sum() / N
+                correction = ls_alpha * ((uniform_ce - nll) * m_ck.float()).sum() / N_dev
                 loss = loss + correction
 
             # Top-probability penalty
             if tp_w > 0:
                 probs = torch.softmax(logits, dim=-1)
                 top_p = probs.max(dim=-1).values
-                loss = loss + tp_w * (top_p * m_ck.float()).sum() / N
+                loss = loss + tp_w * (top_p * m_ck.float()).sum() / N_dev
 
             # EOS calibration
             if eos_w > 0 and te_ck is not None and te_ck.any():
@@ -1719,7 +1726,7 @@ class SFTTrainer(BaseTrainer):
                     effective_win = max(win - rep_ngram + 1, 1)
                     rep_prob = rep_prob / effective_win
 
-                loss = loss + rep_w * (rep_prob * m_ck.float()).sum() / N
+                loss = loss + rep_w * (rep_prob * m_ck.float()).sum() / N_dev
 
             # Per-token importance weight correction
             if tw_vec is not None:
@@ -1732,7 +1739,7 @@ class SFTTrainer(BaseTrainer):
                     tw_ce = nn.functional.cross_entropy(
                         logits, l_ck, ignore_index=-100, reduction="none"
                     )
-                    loss = loss + ((pw - 1.0) * tw_ce * m_ck.float()).sum() / N
+                    loss = loss + ((pw - 1.0) * tw_ce * m_ck.float()).sum() / N_dev
 
             # Prevent NaN from propagating through gradients
             return torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1740,7 +1747,9 @@ class SFTTrainer(BaseTrainer):
         # Compute aux losses with gradient flow back to the model.
         # Each chunk is wrapped in torch.utils.checkpoint so only one chunk's
         # logits (chunk_size × vocab_size) live in memory at a time.
-        total_loss = torch.tensor(0.0, device=hidden_states.device)
+        # Use lm_head_weight.device (not hidden_states.device) because under
+        # model_parallel the logits are computed on the lm_head's GPU.
+        total_loss = torch.tensor(0.0, device=lm_head_weight.device)
         for start in range(0, total_len, chunk_size):
             end = min(start + chunk_size, total_len)
             h = flat_h[start:end]
@@ -1770,6 +1779,9 @@ class SFTTrainer(BaseTrainer):
                 m = flat_m[start:end]
 
                 logits = nn.functional.linear(h.to(lm_head_weight.dtype), lm_head_weight.detach()).float().clamp(min=-1e4, max=1e4)
+                # Align labels and masks to logits device (may differ under model_parallel)
+                l = l.to(logits.device)
+                m = m.to(logits.device)
 
                 # Entropy
                 lp = torch.log_softmax(logits, dim=-1)
@@ -1787,7 +1799,7 @@ class SFTTrainer(BaseTrainer):
                     metric_tp += (probs.max(dim=-1).values * m.float()).sum().item()
 
                 if eos_w > 0 and flat_te is not None:
-                    te = flat_te[start:end]
+                    te = flat_te[start:end].to(logits.device)
                     if te.any():
                         eos_targets = torch.full_like(l, fill_value=-100)
                         eos_targets[te] = eos_token_id

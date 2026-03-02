@@ -109,6 +109,13 @@ def main(script_args, training_args, model_args, dataset_args):
     os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+    # Patch fla Triton kernel bug (affects Qwen3.5 GatedDeltaNet backward pass)
+    try:
+        from loft.patches.fla_triton import patch_fla_wy_fast
+        patch_fla_wy_fast()
+    except Exception:
+        pass  # Non-fatal — only needed for models using flash-linear-attention
+
     ################
     # Model init kwargs
     ################

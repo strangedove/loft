@@ -33,6 +33,7 @@ dependencies = [
     "cut-cross-entropy[transformers]",
     "datasets>=3.0.0",
     "deepspeed>=0.18.5",
+    "flash-linear-attention>=0.4.1",
     "httpx>=0.28.1",
     "huggingface_hub>=1.0.0",
     "liger-kernel>=0.7.0",
@@ -64,6 +65,14 @@ liger = [
 ]
 cce = [
     "cut-cross-entropy[transformers] @ git+https://github.com/axolotl-ai-cloud/ml-cross-entropy.git"
+]
+# Optional: causal-conv1d enables the "fast path" for fla's GatedDeltaNet
+# (used by Qwen3.5 and similar linear-attention models).  Without it, fla
+# falls back to torch.nn.functional.conv1d which is adequate but slower.
+# ABI compatibility with torch can be tricky — prebuilt wheels may not
+# match your torch build.  If installation fails, training still works.
+linear-attn = [
+    "causal-conv1d>=1.5.0"
 ]
 quality = [
     "pyrefly",
