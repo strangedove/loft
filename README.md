@@ -37,6 +37,9 @@ loft prepare train.yaml --debug
 # Train
 loft train train.yaml
 
+# Merge LoRA into base model
+loft merge train.yaml
+
 # Evaluate a checkpoint
 loft eval train.yaml --checkpoint checkpoint-500
 ```
@@ -103,6 +106,28 @@ loft eval train.yaml --temperature 1.1 --min-p 0.15 --max-tokens 1024
 When a LoRA adapter is detected, eval generates with both the LoRA and the base model for side-by-side comparison. Use `--base-only` to skip the LoRA.
 
 Outputs `{prefix}.json` (raw results) and `{prefix}.md` (human-readable markdown).
+
+### `loft merge`
+
+Merges a LoRA adapter into its base model, shard by shard, without loading the full model into memory.
+
+```bash
+# From training config (reads base model and output dir automatically)
+loft merge train.yaml
+loft merge train.yaml --checkpoint checkpoint-1000
+
+# Explicit paths
+loft merge --base-model ./model --lora ./lora-adapter --output ./merged
+
+# Adjust LoRA strength
+loft merge train.yaml --weight 0.5      # Half strength (multiplier on adapter's scale)
+loft merge train.yaml --scale 1.0       # Direct scale factor (replaces adapter config)
+```
+
+- **`--weight`**: Multiplier on the adapter's own scale factor (alpha/r). Useful when you trained the LoRA yourself and want to dial it up or down relative to training strength.
+- **`--scale`**: Replaces the scale factor entirely. Useful for third-party LoRAs where you want an exact value.
+- **`--checkpoint`**: Picks a specific `checkpoint-*` directory inside the output folder. Without it, the latest checkpoint is used.
+- Output defaults to `<output_dir>/merged`.
 
 ## Multi-GPU training
 
