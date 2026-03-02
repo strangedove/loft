@@ -511,6 +511,13 @@ class SFTConfig(TrainingArguments):
         },
     )
 
+    # Internal: original config YAML path, set by TrlParser for model card generation
+    _config_path: Optional[str] = field(
+        default=None,
+        repr=False,
+        metadata={"help": "internal: path to the training config YAML used to launch this run"},
+    )
+
     # W&B project name (handled by CLI, converted to WANDB_PROJECT env var)
     wandb_project: Optional[str] = field(
         default=None,

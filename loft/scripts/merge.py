@@ -211,6 +211,13 @@ def merge(
         if src.exists():
             shutil.copy(src, output_path)
 
+    # Copy training README.md from LoRA adapter (contains model card with
+    # hyperparams, dataset stats, configs) so it survives the merge
+    lora_readme = lora_path / "README.md"
+    if lora_readme.exists():
+        shutil.copy(lora_readme, output_path / "README.md")
+        logger.info("Copied training README.md from LoRA adapter to merged output.")
+
     logger.info(f"Merge complete. Output: {output_path}")
     return output_path
 

@@ -1033,18 +1033,22 @@ class TrlParser(HfArgumentParser):
             # Remember which keys were explicitly set in the YAML config
             # (used by build_prepare_config to distinguish "not set" from default False)
             self._raw_yaml_keys = set(config.keys())
+            self._config_path = os.path.abspath(config_path)
         else:
             config_remaining_strings = []
             self._raw_yaml_keys = set()
+            self._config_path = None
 
         # Parse the arguments from the command line
         output = self.parse_args_into_dataclasses(args=args, return_remaining_strings=return_remaining_strings)
 
-        # Attach raw YAML keys to parsed dataclass instances so downstream code
-        # (e.g. build_prepare_config) can distinguish explicit config values from defaults
+        # Attach raw YAML keys and config path to parsed dataclass instances so downstream
+        # code (e.g. build_prepare_config, model card generation) can access them
         for obj in output:
             if hasattr(obj, "__dataclass_fields__"):
                 obj._raw_yaml_keys = self._raw_yaml_keys
+                if hasattr(obj, "_config_path"):
+                    obj._config_path = self._config_path
 
         # Merge remaining strings from the config file with the remaining strings from the command line
         if return_remaining_strings:

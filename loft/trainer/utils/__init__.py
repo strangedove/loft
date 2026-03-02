@@ -733,6 +733,42 @@ def decode_and_strip_padding(inputs: torch.Tensor, tokenizer: PreTrainedTokenize
     return [d.replace(tokenizer.pad_token, "") for d in decoded]
 
 
+def _is_local_path(value: str) -> bool:
+    """Return True if value looks like a local filesystem path rather than a HF repo ID."""
+    if not isinstance(value, str) or not value:
+        return False
+    return value.startswith("/") or value.startswith("./") or value.startswith("~")
+
+
+def _sanitize_config_dict(config: dict) -> dict:
+    """Return a copy of config with local filesystem paths replaced by basenames.
+
+    This prevents local directory structures from leaking into model cards
+    and avoids HuggingFace Hub rejecting uploads due to invalid metadata.
+    """
+    PATH_KEYS = {
+        "model_name_or_path", "data_config", "prepared_dataset",
+        "output_dir", "chat_template_path", "token_weights",
+        "tokenized_cache_dir", "path", "accelerate_config",
+        "_config_path",
+    }
+    sanitized = {}
+    for k, v in config.items():
+        if isinstance(v, str) and k in PATH_KEYS and _is_local_path(v):
+            sanitized[k] = os.path.basename(v.rstrip("/"))
+        elif isinstance(v, dict):
+            sanitized[k] = _sanitize_config_dict(v)
+        elif isinstance(v, list):
+            sanitized[k] = [
+                _sanitize_config_dict(item) if isinstance(item, dict)
+                else (os.path.basename(item.rstrip("/")) if isinstance(item, str) and _is_local_path(item) else item)
+                for item in v
+            ]
+        else:
+            sanitized[k] = v
+    return sanitized
+
+
 def generate_model_card(
     base_model: str | None,
     model_name: str,
@@ -746,42 +782,34 @@ def generate_model_card(
     paper_title: str | None = None,
     paper_id: str | None = None,
     comet_url: str | None = None,
+    hyperparams: dict | None = None,
+    lora_params: dict | None = None,
+    token_stats: dict | None = None,
+    training_config_yaml: str | None = None,
+    data_config_yaml: str | None = None,
 ) -> ModelCard:
-    """
-    Generate a `ModelCard` from a template.
+    """Generate a ModelCard from a template."""
+    # Sanitize base_model for HF metadata (local paths cause upload failures)
+    # Keep the original for template rendering (template handles display)
+    metadata_base_model = None if (base_model and _is_local_path(base_model)) else base_model
 
-    Args:
-        base_model (`str` or `None`):
-            Base model name.
-        model_name (`str`):
-            Model name.
-        hub_model_id (`str`):
-            Hub model ID as `username/model_id`.
-        dataset_name (`str` or `None`):
-            Dataset name.
-        tags (`list[str]`):
-            Tags.
-        wandb_url (`str` or `None`):
-            Weights & Biases run URL.
-        comet_url (`str` or `None`):
-            Comet experiment URL.
-        trainer_name (`str`):
-            Trainer name.
-        trainer_citation (`str` or `None`, defaults to `None`):
-            Trainer citation as a BibTeX entry.
-        template_file (`str` *optional*):
-            Template file name located in the `trl/templates` directory. Defaults to `lm_model_card.md`.
-        paper_title (`str` or `None`, defaults to `None`):
-            Paper title.
-        paper_id (`str` or `None`, defaults to `None`):
-            ArXiv paper ID as `YYMM.NNNNN`.
+    # Sanitize dataset_name for HF metadata (local paths cause upload failures)
+    if dataset_name and isinstance(dataset_name, str) and _is_local_path(dataset_name):
+        dataset_name = None
+    elif dataset_name and isinstance(dataset_name, list):
+        dataset_name = [d for d in dataset_name if not _is_local_path(d)] or None
 
-    Returns:
-        `ModelCard`:
-            A ModelCard object.
-    """
+    # Sanitize per-dataset names in token_stats for display
+    if token_stats and "per_dataset" in token_stats:
+        sanitized_per = {}
+        for name, stats in token_stats["per_dataset"].items():
+            display_name = os.path.basename(name.rstrip("/")) if _is_local_path(name) else name
+            sanitized_per[display_name] = stats
+        token_stats = dict(token_stats)
+        token_stats["per_dataset"] = sanitized_per
+
     card_data = ModelCardData(
-        base_model=base_model,
+        base_model=metadata_base_model,
         datasets=dataset_name,
         library_name="transformers",
         licence="license",
@@ -802,6 +830,11 @@ def generate_model_card(
         trainer_citation=trainer_citation,
         paper_title=paper_title,
         paper_id=paper_id,
+        hyperparams=hyperparams,
+        lora_params=lora_params,
+        token_stats=token_stats,
+        training_config_yaml=training_config_yaml,
+        data_config_yaml=data_config_yaml,
         loft_version=version("loft"),
         transformers_version=version("transformers"),
         pytorch_version=version("torch"),

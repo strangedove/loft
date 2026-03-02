@@ -820,6 +820,43 @@ def save_prepared_dataset(
         "eval_trainable_tokens": eval_trainable,
     }
 
+    # Per-dataset token breakdown (uses _dataset_name column from data loading)
+    def count_tokens_by_dataset(dataset):
+        """Count tokens per dataset source using the _dataset_name column."""
+        import pyarrow.compute as pc
+
+        table = dataset.data
+        if "_dataset_name" not in table.column_names:
+            return {}
+
+        lengths = pc.list_value_length(table.column("input_ids"))
+        names = table.column("_dataset_name")
+        has_masks = "assistant_masks" in table.column_names
+
+        per_dataset = {}
+        for name in pc.unique(names).to_pylist():
+            mask = pc.equal(names, name)
+            subset_lengths = pc.filter(lengths, mask)
+            total = pc.sum(subset_lengths).as_py()
+            samples = pc.sum(mask.cast("int64")).as_py()
+
+            if has_masks:
+                subset_masks = pc.filter(pc.list_flatten(table.filter(mask).column("assistant_masks")), None)
+                trainable = pc.sum(pc.list_flatten(table.filter(mask).column("assistant_masks"))).as_py()
+            else:
+                trainable = total
+
+            per_dataset[name] = {
+                "samples": samples,
+                "total_tokens": total,
+                "trainable_tokens": trainable,
+            }
+        return per_dataset
+
+    train_per_dataset = count_tokens_by_dataset(dataset_dict["train"])
+    if train_per_dataset:
+        metadata["token_stats"]["per_dataset"] = train_per_dataset
+
     # Re-save metadata with token stats
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
@@ -839,6 +876,11 @@ def save_prepared_dataset(
     if eval_tokens > 0:
         print(f"   Eval:  {eval_tokens:,} tokens ({eval_trainable:,} trainable)")
     print(f"   Total: {total_tokens:,} tokens ({total_trainable:,} trainable)")
+    if train_per_dataset:
+        print(f"\n   Per-dataset breakdown:")
+        for ds_name, ds_stats in sorted(train_per_dataset.items()):
+            short = os.path.basename(ds_name) if "/" in ds_name else ds_name
+            print(f"     {short}: {ds_stats['total_tokens']:,} tokens ({ds_stats['samples']:,} samples)")
 
 
 def dry_run(training_config: dict) -> None:
