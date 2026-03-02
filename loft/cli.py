@@ -6,6 +6,8 @@ from accelerate.commands.launch import launch_command, launch_command_parser
 
 from .scripts.eval import main as eval_main
 from .scripts.eval import make_parser as make_eval_parser
+from .scripts.merge import main as merge_main
+from .scripts.merge import make_parser as make_merge_parser
 from .scripts.prepare import main as prepare_main
 from .scripts.prepare import make_parser as make_prepare_parser
 from .scripts.sft import make_parser as make_sft_parser
@@ -232,6 +234,12 @@ def main():
             eval_parser = make_eval_parser()
             eval_args = eval_parser.parse_args(sys.argv[2:])
             eval_main(eval_args)
+            return
+
+        if command == "merge":
+            merge_parser = make_merge_parser()
+            merge_args = merge_parser.parse_args(sys.argv[2:])
+            merge_main(merge_args)
             return
 
     parser = TrlParser(prog="loft", usage="loft", allow_abbrev=False)
