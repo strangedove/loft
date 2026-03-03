@@ -1172,14 +1172,86 @@ def _process_single_dataset(
         load_data_files = load_path
         load_path = loader
 
-    dataset = datasets.load_dataset(
-        path=load_path,
-        name=dataset_config.name,
-        data_dir=dataset_config.data_dir,
-        data_files=load_data_files,
-        split=dataset_config.split,
-        streaming=mixture_config.streaming,
-    )
+    # If columns are specified, pass them to load_dataset to avoid schema inference
+    # failures on columns we don't need (e.g. mixed null/int64 types).
+    # The `columns` kwarg is only supported by certain builders (parquet, arrow).
+    load_columns = None
+    if dataset_config.columns is not None:
+        if load_path in ("parquet", "arrow"):
+            load_columns = dataset_config.columns
+        elif load_data_files is not None:
+            _first_file = load_data_files if isinstance(load_data_files, str) else (
+                load_data_files[0] if isinstance(load_data_files, list) and load_data_files else None
+            )
+            if _first_file and os.path.splitext(_first_file)[1].lower() in (".parquet", ".arrow"):
+                load_columns = dataset_config.columns
+
+    try:
+        dataset = datasets.load_dataset(
+            path=load_path,
+            name=dataset_config.name,
+            data_dir=dataset_config.data_dir,
+            data_files=load_data_files,
+            split=dataset_config.split,
+            streaming=mixture_config.streaming,
+            columns=load_columns,
+        )
+    except (TypeError, datasets.exceptions.DatasetGenerationError) as exc:
+        if load_columns is not None:
+            # columns kwarg may not be supported by the loader/version — retry without it
+            logger.info("  columns kwarg not supported by loader, falling back to post-load select")
+            dataset = datasets.load_dataset(
+                path=load_path,
+                name=dataset_config.name,
+                data_dir=dataset_config.data_dir,
+                data_files=load_data_files,
+                split=dataset_config.split,
+                streaming=mixture_config.streaming,
+            )
+        elif dataset_config.columns is not None:
+            # Schema inference failed (e.g. null/int64 mixed types in unused columns).
+            # Fall back to loading via pandas with only the requested columns.
+            import pandas as pd
+            from huggingface_hub import hf_hub_download
+            logger.warning(
+                f"  load_dataset failed with schema error, falling back to pandas column-filtered load"
+            )
+            files_to_load = load_data_files
+            if isinstance(files_to_load, str):
+                files_to_load = [files_to_load]
+            elif files_to_load is None:
+                raise
+
+            dfs = []
+            for data_file in files_to_load:
+                ext = os.path.splitext(data_file)[1].lower()
+                # Resolve file path: either local or download from Hub
+                if os.path.isfile(data_file):
+                    file_path = data_file
+                elif os.path.isdir(load_path):
+                    file_path = os.path.join(load_path, data_file)
+                else:
+                    file_path = hf_hub_download(
+                        repo_id=load_path, filename=data_file, repo_type="dataset"
+                    )
+
+                if ext == ".parquet":
+                    df = pd.read_parquet(file_path, columns=dataset_config.columns)
+                elif ext in (".json", ".jsonl"):
+                    df = pd.read_json(file_path, lines=(ext == ".jsonl"))
+                    df = df[dataset_config.columns]
+                elif ext == ".csv":
+                    df = pd.read_csv(file_path, usecols=dataset_config.columns)
+                else:
+                    raise RuntimeError(
+                        f"Cannot do pandas fallback load for extension '{ext}'"
+                    ) from exc
+                dfs.append(df)
+
+            combined_df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
+            dataset = datasets.Dataset.from_pandas(combined_df)
+        else:
+            raise
 
     # For streaming datasets, we can't do shuffle/subset/split operations
     if mixture_config.streaming:
@@ -1189,9 +1261,12 @@ def _process_single_dataset(
 
     original_len = len(dataset)
 
-    # Select columns if specified
+    # Select columns if specified (may already be filtered via load_dataset columns kwarg)
     if dataset_config.columns is not None:
-        dataset = dataset.select_columns(dataset_config.columns)
+        missing = [c for c in dataset_config.columns if c not in dataset.column_names]
+        extra = [c for c in dataset.column_names if c not in dataset_config.columns]
+        if extra:
+            dataset = dataset.select_columns(dataset_config.columns)
 
     # For conversational datasets, normalize columns and message structure so that
     # datasets with extra metadata columns/keys can be concatenated safely.
@@ -1395,6 +1470,30 @@ def get_dataset(mixture_config: DatasetMixtureConfig) -> DatasetDict:
     if not train_datasets:
         raise ValueError("No datasets were loaded from the mixture configuration")
 
+    # Normalize Arrow string types before concatenation.
+    # Parquet files produce large_string while JSON/JSONL produce string — datasets
+    # refuses to concatenate mismatched types.  Cast everything to plain string.
+    def _normalize_string_features(ds_list):
+        if not ds_list:
+            return ds_list
+        import pyarrow as pa
+        normalized = []
+        for ds in ds_list:
+            new_features = {}
+            needs_cast = False
+            for col_name, feat in ds.features.items():
+                if isinstance(feat, datasets.Value) and feat.dtype == "large_string":
+                    new_features[col_name] = datasets.Value("string")
+                    needs_cast = True
+                else:
+                    new_features[col_name] = feat
+            if needs_cast:
+                ds = ds.cast(datasets.Features(new_features))
+            normalized.append(ds)
+        return normalized
+
+    train_datasets = _normalize_string_features(train_datasets)
+
     # Combine train datasets
     combined_train = concatenate_datasets(train_datasets)
     if isinstance(combined_train, datasets.Dataset):
@@ -1403,6 +1502,7 @@ def get_dataset(mixture_config: DatasetMixtureConfig) -> DatasetDict:
     # Combine eval datasets if any
     combined_eval = None
     if eval_datasets:
+        eval_datasets = _normalize_string_features(eval_datasets)
         combined_eval = concatenate_datasets(eval_datasets)
         if isinstance(combined_eval, datasets.Dataset):
             logger.info(f"Combined eval dataset: {len(combined_eval)} examples")
