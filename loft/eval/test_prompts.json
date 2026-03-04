@@ -255,7 +255,7 @@
       },
       {
         "role": "user",
-        "content": "A hunter is hiking through the wilderness. He treks 10 miles south, then 10 miles east where he sees a small bear, then 10 miles north, then 10 miles west to get back to where he started. What color was the bear?"
+        "content": "A hunter is hiking through the wilderness. He treks 10 miles south, then 10 miles east where he sees a sloth bear, then 10 miles north, then 10 miles west to get back to where he started. What color was the bear?"
       }
     ]
   },

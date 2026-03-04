@@ -841,7 +841,6 @@ def save_prepared_dataset(
             samples = pc.sum(mask.cast("int64")).as_py()
 
             if has_masks:
-                subset_masks = pc.filter(pc.list_flatten(table.filter(mask).column("assistant_masks")), None)
                 trainable = pc.sum(pc.list_flatten(table.filter(mask).column("assistant_masks"))).as_py()
             else:
                 trainable = total

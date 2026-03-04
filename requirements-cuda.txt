@@ -1,0 +1,41 @@
+# Pinned CUDA-accelerated dependencies for loft
+# Tested on: RTX 3090 (sm_86), Ubuntu 24.04, Python 3.12, CUDA 12.4
+#
+# Install order matters! Follow these steps:
+#
+# 1. Install torch first (from PyTorch index):
+#    uv pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0+cu124 \
+#      --index-url https://download.pytorch.org/whl/cu124
+#
+# 2. Install flash-attn (pre-built wheel from Dao-AILab GitHub releases):
+#    uv pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.3/flash_attn-2.7.3+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl"
+#
+# 3. Install causal-conv1d from source (PyPI wheel has ABI mismatch):
+#    TORCH_CUDA_ARCH_LIST="8.6" uv pip install \
+#      "causal-conv1d @ git+https://github.com/Dao-AILab/causal-conv1d.git" \
+#      --no-build-isolation --no-deps
+#
+# 4. Install remaining deps:
+#    uv pip install -r requirements-cuda.txt --no-deps
+#
+# WARNING: Do NOT let uv/pip resolve torch freely — it will upgrade to 2.10+
+# and break flash-attn/causal-conv1d. Always use --no-deps for CUDA extension
+# packages, or re-pin torch afterward.
+
+# Core ML
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+torchaudio==2.6.0
+triton==3.2.0
+transformers==5.2.0
+
+# CUDA extensions (see install instructions above)
+flash-attn==2.7.3
+causal-conv1d==1.6.0
+flash-linear-attention==0.4.1
+
+# Training stack
+accelerate==1.12.0
+peft==0.18.1
+bitsandbytes==0.49.2
+liger-kernel==0.7.0

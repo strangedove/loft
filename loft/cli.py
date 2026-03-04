@@ -272,6 +272,8 @@ def main():
         "--wandb_project",
         "--saves_per_epoch",
         "--evals_per_epoch",
+        "--use_liger",
+        "--use_cce",
     ]
     for field in custom_fields_to_filter:
         if field in launch_args:
