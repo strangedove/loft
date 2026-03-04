@@ -127,11 +127,31 @@ def _load_one_sample_per_dataset(data_config_path: str) -> tuple[list[tuple[str,
                 label = f"{ds_config.path}/{ds_config.data_files[0]}"
 
         try:
+            load_path = ds_config.path
+            load_data_files = ds_config.data_files
+
+            # If path points to a local file, use the appropriate format loader
+            # (mirrors the logic in get_dataset / _load_single_dataset in utils.py)
+            if os.path.isfile(load_path):
+                _ext_to_loader = {
+                    ".json": "json",
+                    ".jsonl": "json",
+                    ".csv": "json",
+                    ".parquet": "parquet",
+                    ".arrow": "arrow",
+                    ".txt": "text",
+                }
+                ext = os.path.splitext(load_path)[1].lower()
+                loader = _ext_to_loader.get(ext)
+                if loader:
+                    load_data_files = load_path
+                    load_path = loader
+
             ds = load_dataset(
-                path=ds_config.path,
+                path=load_path,
                 name=ds_config.name,
                 data_dir=ds_config.data_dir,
-                data_files=ds_config.data_files,
+                data_files=load_data_files,
                 split=ds_config.split,
             )
             sample = next(iter(ds))
