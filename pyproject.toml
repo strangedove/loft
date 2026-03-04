@@ -48,7 +48,6 @@ dependencies = [
     "setuptools>=80.10.2",
     "torch>=2.0.0",
     "transformers>=5.0.0",
-    "vllm>=0.8.0",
     "wandb>=0.24.1",
 ]
 dynamic = ["version"]
@@ -60,17 +59,20 @@ Homepage = "https://github.com/strangedove/loft"
 loft = "loft.cli:main"
 
 [project.optional-dependencies]
-liger = [
-    "liger-kernel>=0.6.2"
-]
 cce = [
     "cut-cross-entropy[transformers] @ git+https://github.com/axolotl-ai-cloud/ml-cross-entropy.git"
 ]
-# Optional: causal-conv1d enables the "fast path" for fla's GatedDeltaNet
+# flash-attn: Pre-built wheels from Dao-AILab GitHub releases are recommended.
+# PyPI wheels may have ABI mismatches with torch. See requirements-cuda.txt
+# for tested install instructions.
+flash = [
+    "flash-attn>=2.7.0"
+]
+# causal-conv1d enables the "fast path" for fla's GatedDeltaNet
 # (used by Qwen3.5 and similar linear-attention models).  Without it, fla
 # falls back to torch.nn.functional.conv1d which is adequate but slower.
-# ABI compatibility with torch can be tricky — prebuilt wheels may not
-# match your torch build.  If installation fails, training still works.
+# Build from source recommended — PyPI wheels may have ABI mismatches.
+# See requirements-cuda.txt for tested install instructions.
 linear-attn = [
     "causal-conv1d>=1.5.0"
 ]
@@ -81,15 +83,10 @@ quality = [
 eval = [
     "vllm>=0.8.0"
 ]
-quantization = [
-    "bitsandbytes"
-]
 dev = [
-    "liger-kernel>=0.6.2",
     "cut-cross-entropy[transformers] @ git+https://github.com/axolotl-ai-cloud/ml-cross-entropy.git",
     "pyrefly",
     "pre-commit",
-    "bitsandbytes",
     "parameterized",
     "vllm>=0.8.0",
 ]
