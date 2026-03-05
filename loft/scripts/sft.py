@@ -116,6 +116,24 @@ def main(script_args, training_args, model_args, dataset_args):
     except Exception:
         pass  # Non-fatal — only needed for models using flash-linear-attention
 
+    # Fix flash_attention_2 crash on models with 3D position_ids (e.g. Qwen3.5 rope3d).
+    # Transformers' _is_packed_sequence assumes 2D position_ids [batch, seq_len] but
+    # Qwen3.5 passes 3D [3, batch, seq_len] for its 3D rotary embeddings.  The 3D shape
+    # causes false-positive packed sequence detection, sending data through the varlen
+    # path with incorrect cu_seqlens, resulting in illegal memory access.
+    try:
+        import transformers.modeling_flash_attention_utils as _fa_utils
+        _orig_is_packed = _fa_utils._is_packed_sequence
+
+        def _fixed_is_packed_sequence(position_ids, batch_size):
+            if position_ids is None or position_ids.ndim != 2:
+                return False
+            return _orig_is_packed(position_ids, batch_size)
+
+        _fa_utils._is_packed_sequence = _fixed_is_packed_sequence
+    except Exception:
+        pass  # Non-fatal — only needed for flash_attention_2
+
     ################
     # Model init kwargs
     ################
