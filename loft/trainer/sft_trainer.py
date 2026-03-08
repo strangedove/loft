@@ -808,14 +808,83 @@ def aux_top_prob_penalty_loss(logits, labels, _chunk_size: int = 512):
 
 
 _LIGER_AUX_CHUNK_SIZE = 1024  # tokens per chunk for Liger-compatible chunked logit computation
+_VOCAB_CHUNK_SIZE = 8192  # vocab tokens per chunk for memory-efficient top-prob/EOS aux losses
+
+
+def _vocab_chunked_tp_eos_loss(
+    h_ck, w, m_ck, te_ck, eos_token_id, tp_w, eos_w, n_trainable, n_turn_ends,
+    vocab_chunk_size=_VOCAB_CHUNK_SIZE,
+):
+    """Compute top-prob and EOS aux losses without materializing full (seq, V) logits.
+
+    Streams the lm_head projection over vocabulary chunks of size K, computing
+    running max and logsumexp.  Peak memory is O(seq_chunk × K) instead of
+    O(seq_chunk × V) — a ~30× reduction for 248K-vocab models.
+
+    Args:
+        h_ck:  (N, H) hidden states for this sequence chunk (gradient flows through).
+        w:     (V, H) detached lm_head weight.
+        m_ck:  (N,) bool trainable-position mask.
+        te_ck: (N,) bool turn-end mask, or None.
+        eos_token_id: int.
+        tp_w:  float, top-prob loss weight.
+        eos_w: float, EOS loss weight.
+        n_trainable: float tensor, total trainable tokens for normalization.
+        n_turn_ends: int, total turn-end positions across all chunks.
+        vocab_chunk_size: int, vocabulary chunk size (default 8192).
+
+    Returns:
+        Scalar loss tensor.
+    """
+    dev = h_ck.device
+    V = w.shape[0]
+    h_f = h_ck.to(w.dtype)
+
+    # Streaming logsumexp over vocabulary chunks
+    running_max = torch.full((h_ck.shape[0],), -1e10, device=dev, dtype=torch.float32)
+    running_sum_exp = torch.zeros(h_ck.shape[0], device=dev, dtype=torch.float32)
+
+    for v_start in range(0, V, vocab_chunk_size):
+        v_end = min(v_start + vocab_chunk_size, V)
+        partial = nn.functional.linear(h_f, w[v_start:v_end]).float()
+        partial = partial.clamp(min=-1e4, max=1e4)
+
+        chunk_max = partial.max(dim=-1).values
+        new_max = torch.maximum(running_max, chunk_max)
+        running_sum_exp = (
+            running_sum_exp * torch.exp(running_max - new_max)
+            + torch.exp(partial - new_max.unsqueeze(-1)).sum(dim=-1)
+        )
+        running_max = new_max
+
+    logsumexp = running_max + torch.log(running_sum_exp)
+
+    loss = torch.tensor(0.0, device=dev)
+    N_dev = n_trainable.to(dev)
+
+    # Top-probability penalty
+    if tp_w > 0:
+        top_prob = torch.exp(running_max - logsumexp)
+        loss = loss + tp_w * (top_prob * m_ck.float()).sum() / N_dev
+
+    # EOS calibration at turn-end positions
+    if eos_w > 0 and te_ck is not None and te_ck.any():
+        eos_logit = nn.functional.linear(h_f, w[eos_token_id:eos_token_id + 1]).float().squeeze(-1)
+        eos_logit = eos_logit.clamp(min=-1e4, max=1e4)
+        eos_ce = -(eos_logit - logsumexp)
+        eos_loss = (eos_ce * te_ck.float()).sum() / te_ck.sum().float()
+        loss = loss + eos_w * eos_loss * te_ck.sum().float() / n_turn_ends
+
+    return torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 class _HiddenStateCapture:
     """Forward hook helper to capture the last hidden state from a model backbone.
 
-    When Liger kernel is enabled, the model's forward pass computes loss without
-    materializing the full logits tensor. This hook captures the last hidden state
-    so we can compute auxiliary losses from it in chunks.
+    When Liger kernel or Cut Cross-Entropy (CCE) is enabled, the model's forward
+    pass computes loss without materializing the full logits tensor. This hook
+    captures the last hidden state so we can compute auxiliary losses from it
+    (either via full-logits chunks or the more efficient vocab-chunked path).
 
     When a ``lm_head`` module reference is provided, the hook also clones the
     lm_head weight at hook time.  This is critical for FSDP FULL_SHARD: when
@@ -1283,13 +1352,18 @@ class SFTTrainer(BaseTrainer):
             or (args.aux_loss_rep_weight or 0) > 0
             or (args.aux_loss_top_prob_weight or 0) > 0
         )
+        has_only_tp_eos = has_any_aux_loss and (args.aux_loss_rep_weight or 0) == 0
         if has_any_aux_loss and args.use_cce:
-            logger.warning(
-                "Auxiliary losses (aux_loss_*) are configured but will be IGNORED because "
-                "use_cce=True is enabled. CCE computes loss without materializing logits, and "
-                "chunked aux loss computation is not supported with CCE. Disable CCE to use "
-                "auxiliary losses."
-            )
+            if has_only_tp_eos:
+                logger.info(
+                    "Auxiliary losses (top_prob/EOS) with CCE: will compute from hidden states "
+                    "using vocab-chunked projection (no full logit materialization)."
+                )
+            else:
+                logger.warning(
+                    "Repetition penalty aux loss requires full logit materialization and is not "
+                    "supported with use_cce=True. Only top_prob and EOS aux losses will be active."
+                )
         if has_any_aux_loss and args.use_liger_kernel:
             logger.info(
                 "Auxiliary losses with Liger kernel: logits will be computed in chunks from "
@@ -1404,12 +1478,14 @@ class SFTTrainer(BaseTrainer):
         if args.token_weights:
             self._token_weight_vec = self._load_token_weights(args.token_weights, processing_class)
 
-        # Set up Liger kernel hidden state capture for chunked aux loss computation
+        # Set up hidden state capture for chunked aux loss computation.
+        # Needed when logits aren't materialized (Liger kernel or CCE).
         self._liger_needs_chunked = False
         self._liger_hidden_capture = None
         needs_ls_correction = args.use_liger_kernel and (args.label_smoothing or 0) > 0
         has_token_weights = self._token_weight_vec is not None
-        if args.use_liger_kernel and (has_any_aux_loss or needs_ls_correction or has_token_weights):
+        no_logits = args.use_liger_kernel or args.use_cce
+        if no_logits and (has_any_aux_loss or needs_ls_correction or has_token_weights):
             self._liger_needs_chunked = True
             self._setup_liger_aux_hook()
 
@@ -1500,9 +1576,11 @@ class SFTTrainer(BaseTrainer):
     def _setup_liger_aux_hook(self):
         """Register a forward hook on the model backbone to capture last hidden states.
 
-        When Liger's fused linear cross entropy is active, the model's forward pass
-        does not materialize logits. This hook captures the last hidden state so we
-        can compute logits in chunks for auxiliary loss computation.
+        When Liger kernel or CCE is active, the model's forward pass does not
+        materialize logits. This hook captures the last hidden state so we can
+        compute auxiliary losses from hidden states — either via full-logits
+        chunks (when rep/label_smoothing/token_weights are active) or the more
+        memory-efficient vocab-chunked path (when only top-prob/EOS are active).
 
         The hook also captures the lm_head weight at hook time so that the full
         (unsharded) weight is available for aux-loss computation even when FSDP
@@ -1523,7 +1601,7 @@ class SFTTrainer(BaseTrainer):
         # (The clone is only needed for FSDP FULL_SHARD, not single-GPU/DDP.)
         self._liger_hidden_capture = _HiddenStateCapture(lm_head=None)
         backbone.register_forward_hook(self._liger_hidden_capture)
-        logger.info("Registered hidden state capture hook for Liger + aux losses")
+        logger.info("Registered hidden state capture hook for aux loss computation from hidden states")
 
     def _compute_chunked_aux_losses(self, hidden_states, labels, assistant_masks, mode):
         """Compute auxiliary losses from hidden states in chunks (Liger-compatible).
@@ -1628,6 +1706,16 @@ class SFTTrainer(BaseTrainer):
             n_turn_ends = flat_te.sum().item()
             if n_turn_ends == 0:
                 eos_w = 0
+
+        # Dispatch: when only top-prob and/or EOS are active (no rep, label smoothing,
+        # or token weights), use the vocab-chunked path that never materializes
+        # the full (seq_chunk, V) logit tensor.
+        needs_full_logits = (rep_w > 0) or (ls_alpha > 0) or (tw_vec is not None)
+        if not needs_full_logits and (tp_w > 0 or eos_w > 0):
+            return self._compute_vocab_chunked_aux_path(
+                flat_h, flat_l, flat_m, flat_te, lm_head_weight,
+                tp_w, eos_w, eos_token_id, N_trainable, n_turn_ends, mode,
+            )
 
         chunk_size = _LIGER_AUX_CHUNK_SIZE
         total_len = flat_h.shape[0]
@@ -1880,6 +1968,145 @@ class SFTTrainer(BaseTrainer):
                     rep_val = torch.tensor(metric_rep / N_item, device=hidden_states.device)
                     self._metrics[mode]["aux_loss_rep"].append(
                         self.accelerator.gather_for_metrics(rep_val).mean().item()
+                    )
+
+        return total_loss
+
+    def _compute_vocab_chunked_aux_path(
+        self, flat_h, flat_l, flat_m, flat_te, lm_head_weight,
+        tp_w, eos_w, eos_token_id, N_trainable, n_turn_ends, mode,
+    ):
+        """Compute top-prob and/or EOS aux losses + metrics using vocab-chunked projection.
+
+        Instead of materializing the full (seq_chunk, V) logit tensor, streams the
+        lm_head projection over vocabulary chunks of size K.  Peak memory per seq
+        chunk is O(seq_chunk × K) instead of O(seq_chunk × V).
+
+        Called from ``_compute_chunked_aux_losses_inner`` when only top-prob and/or
+        EOS losses are active (no rep, label smoothing, or token weights).
+        """
+        chunk_size = _LIGER_AUX_CHUNK_SIZE
+        total_len = flat_h.shape[0]
+        N = N_trainable.float()
+
+        # --- Gradient pass: checkpointed seq chunks ---
+        total_loss = torch.tensor(0.0, device=lm_head_weight.device)
+        for start in range(0, total_len, chunk_size):
+            end = min(start + chunk_size, total_len)
+            h = flat_h[start:end]
+            m = flat_m[start:end]
+            te = flat_te[start:end] if flat_te is not None else None
+
+            cl = torch.utils.checkpoint.checkpoint(
+                _vocab_chunked_tp_eos_loss,
+                h, lm_head_weight, m, te,
+                eos_token_id, tp_w, eos_w, N, n_turn_ends,
+                use_reentrant=False,
+            )
+            total_loss = total_loss + cl
+
+        # --- No-grad metrics pass: entropy, accuracy, per-loss values ---
+        with torch.no_grad():
+            total_entropy_sum = 0.0
+            correct_tokens = 0
+            total_mask_count = 0
+            metric_tp = 0.0
+            metric_eos = 0.0
+            V = lm_head_weight.shape[0]
+            vcs = _VOCAB_CHUNK_SIZE
+
+            for start in range(0, total_len, chunk_size):
+                end = min(start + chunk_size, total_len)
+                h = flat_h[start:end].detach()
+                l = flat_l[start:end]
+                m = flat_m[start:end]
+
+                # Align to lm_head device
+                dev = lm_head_weight.device
+                l = l.to(dev)
+                m = m.to(dev)
+                h_f = h.to(lm_head_weight.dtype)
+                n_pos = h.shape[0]
+
+                # Streaming logsumexp + argmax + expected_logit over vocab chunks
+                running_max = torch.full((n_pos,), -1e10, device=dev, dtype=torch.float32)
+                running_sum_exp = torch.zeros(n_pos, device=dev, dtype=torch.float32)
+                running_argmax = torch.zeros(n_pos, device=dev, dtype=torch.long)
+                running_argmax_val = torch.full((n_pos,), -1e10, device=dev, dtype=torch.float32)
+                expected_logit = torch.zeros(n_pos, device=dev, dtype=torch.float32)
+
+                for v_start in range(0, V, vcs):
+                    v_end = min(v_start + vcs, V)
+                    partial = nn.functional.linear(h_f, lm_head_weight[v_start:v_end]).float()
+                    partial = partial.clamp(min=-1e4, max=1e4)
+
+                    chunk_max, chunk_argmax = partial.max(dim=-1)
+
+                    # Update streaming logsumexp
+                    new_max = torch.maximum(running_max, chunk_max)
+                    running_sum_exp = (
+                        running_sum_exp * torch.exp(running_max - new_max)
+                        + torch.exp(partial - new_max.unsqueeze(-1)).sum(dim=-1)
+                    )
+                    running_max = new_max
+
+                    # Update argmax tracking
+                    better = chunk_max > running_argmax_val
+                    running_argmax = torch.where(better, chunk_argmax + v_start, running_argmax)
+                    running_argmax_val = torch.where(better, chunk_max, running_argmax_val)
+
+                logsumexp = running_max + torch.log(running_sum_exp)
+
+                # Second vocab pass for entropy: E[logit] = Σ softmax_i * logit_i
+                for v_start in range(0, V, vcs):
+                    v_end = min(v_start + vcs, V)
+                    partial = nn.functional.linear(h_f, lm_head_weight[v_start:v_end]).float()
+                    partial = partial.clamp(min=-1e4, max=1e4)
+                    partial_softmax = torch.exp(partial - logsumexp.unsqueeze(-1))
+                    expected_logit = expected_logit + (partial_softmax * partial).sum(dim=-1)
+
+                # Entropy = logsumexp - E[logit]
+                ent = logsumexp - expected_logit
+                total_entropy_sum += (ent * m.float()).sum().item()
+                total_mask_count += m.sum().item()
+
+                # Accuracy
+                correct_tokens += ((running_argmax == l) & m).sum().item()
+
+                # Top-prob metric
+                if tp_w > 0:
+                    top_prob = torch.exp(running_max - logsumexp)
+                    metric_tp += (top_prob * m.float()).sum().item()
+
+                # EOS metric
+                if eos_w > 0 and flat_te is not None:
+                    te = flat_te[start:end].to(dev)
+                    if te.any():
+                        eos_logit = nn.functional.linear(
+                            h_f, lm_head_weight[eos_token_id:eos_token_id + 1]
+                        ).float().squeeze(-1).clamp(min=-1e4, max=1e4)
+                        eos_ce_val = -(eos_logit - logsumexp)
+                        metric_eos += (eos_ce_val * te.float()).sum().item() / te.sum().float().item()
+
+            # Log metrics
+            N_item = N_trainable.item()
+            if N_item > 0:
+                entropy_val = torch.tensor(total_entropy_sum / N_item, device=flat_h.device)
+                self._metrics[mode]["entropy"].append(
+                    self.accelerator.gather_for_metrics(entropy_val).mean().item()
+                )
+                accuracy = correct_tokens / total_mask_count if total_mask_count > 0 else 0.0
+                self._metrics[mode]["mean_token_accuracy"].append(accuracy)
+
+                if tp_w > 0:
+                    tp_val = torch.tensor(metric_tp / N_item, device=flat_h.device)
+                    self._metrics[mode]["aux_loss_top_prob"].append(
+                        self.accelerator.gather_for_metrics(tp_val).mean().item()
+                    )
+                if eos_w > 0:
+                    eos_val = torch.tensor(metric_eos, device=flat_h.device)
+                    self._metrics[mode]["aux_loss_eos"].append(
+                        self.accelerator.gather_for_metrics(eos_val).mean().item()
                     )
 
         return total_loss

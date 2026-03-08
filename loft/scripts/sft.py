@@ -116,6 +116,15 @@ def main(script_args, training_args, model_args, dataset_args):
     except Exception:
         pass  # Non-fatal — only needed for models using flash-linear-attention
 
+    # Skip caching_allocator_warmup — it incorrectly estimates peak memory for quantized
+    # models (counts full-precision size), causing OOM on memory-constrained GPUs.
+    # This is only a CUDA allocator warm-up optimization, not required for correctness.
+    try:
+        import transformers.modeling_utils as _mu
+        _mu.caching_allocator_warmup = lambda *args, **kwargs: None
+    except Exception:
+        pass
+
     # Fix flash_attention_2 crash on models with 3D position_ids (e.g. Qwen3.5 rope3d).
     # Transformers' _is_packed_sequence assumes 2D position_ids [batch, seq_len] but
     # Qwen3.5 passes 3D [3, batch, seq_len] for its 3D rotary embeddings.  The 3D shape
