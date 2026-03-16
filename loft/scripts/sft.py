@@ -79,6 +79,7 @@ from loft import (
     SFTConfig,
     SFTTrainer,
     TrlParser,
+    compute_balanced_device_map,
     get_dataset,
     get_kbit_device_map,
     get_peft_config,
@@ -201,14 +202,43 @@ def main(script_args, training_args, model_args, dataset_args):
         os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
 
     import torch
-    if model_args.model_parallel and torch.cuda.device_count() > 1:
-        # Let accelerate's infer_auto_device_map handle memory-aware placement.
-        # A manual device_map with a "" catch-all can interfere with sub-module
-        # dispatch hooks (e.g. layernorm weights placed on the wrong GPU during
-        # gradient checkpointing recomputation).  "auto" generates explicit
-        # per-module entries and avoids this class of device mismatch.
-        model_kwargs["device_map"] = "auto"
     valid_image_text_architectures = MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES.values()
+
+    if model_args.model_parallel and torch.cuda.device_count() > 1:
+        # Compute a quantization-aware device map ourselves instead of relying on
+        # from_pretrained's device_map="auto".  The latter uses bf16 module sizes even
+        # for 4-bit models, causing heavily unbalanced distributions (e.g. 14 vs 50
+        # layers for Qwen3.5-27B).  By passing dtype=int8 to infer_auto_device_map,
+        # we get sizes that match actual 4-bit storage and a balanced split.
+        from accelerate import init_empty_weights
+
+        is_vl = config.architectures and any(a in valid_image_text_architectures for a in config.architectures)
+        with init_empty_weights():
+            if is_vl:
+                from transformers import AutoModelForImageTextToText
+                meta_model = AutoModelForImageTextToText.from_config(config, trust_remote_code=model_args.trust_remote_code)
+            else:
+                meta_model = AutoModelForCausalLM.from_config(config, trust_remote_code=model_args.trust_remote_code)
+
+        device_map = compute_balanced_device_map(
+            meta_model,
+            model_config=config,
+            is_quantized_4bit=model_args.load_in_4bit,
+            is_quantized_8bit=model_args.load_in_8bit,
+            max_memory=model_args.max_memory,
+            batch_size=training_args.per_device_train_batch_size,
+            max_length=training_args.max_length or 2048,
+            use_cce=getattr(training_args, "use_cce", False),
+            use_lora=model_args.use_peft,
+            lora_r=model_args.lora_r,
+        )
+        del meta_model
+
+        if device_map is not None:
+            model_kwargs["device_map"] = device_map
+        else:
+            # Fallback to auto if compute_balanced_device_map returned None (single GPU)
+            model_kwargs["device_map"] = "auto"
 
     if config.architectures and any(arch in valid_image_text_architectures for arch in config.architectures):
         from transformers import AutoModelForImageTextToText
@@ -439,6 +469,19 @@ def main(script_args, training_args, model_args, dataset_args):
             logger.info("Patched CAME optimizer step_param for model_parallel device alignment.")
         except (ImportError, AttributeError):
             pass  # CAME not installed or API changed
+
+    # Apply chunked MLP for memory-efficient long-context training.
+    # Patches gated MLP modules to process the sequence dimension in chunks,
+    # reducing peak intermediate activation memory by ~num_chunks×.
+    # Must be applied after model loading (and after any Liger patches) but
+    # before trainer init, since PeftModel wrapping happens in the trainer.
+    if training_args.chunked_mlp:
+        from loft.trainer.chunked_mlp import patch_mlp_chunking
+        n_patched = patch_mlp_chunking(model, num_chunks=training_args.chunked_mlp_chunks)
+        logger.info(
+            f"Applied chunked MLP: {n_patched} modules patched with "
+            f"{training_args.chunked_mlp_chunks} chunks"
+        )
 
     # Load the dataset
     if training_args.prepared_dataset:
