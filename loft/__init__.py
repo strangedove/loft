@@ -42,6 +42,7 @@ _import_structure = {
         "RichProgressCallback",
     ],
     "trainer.utils": [
+        "compute_balanced_device_map",
         "get_kbit_device_map",
         "get_peft_config",
         "get_quantization_config",
@@ -84,7 +85,7 @@ if TYPE_CHECKING:
         MergeModelCallback,
         RichProgressCallback,
     )
-    from .trainer.utils import get_kbit_device_map, get_peft_config, get_quantization_config
+    from .trainer.utils import compute_balanced_device_map, get_kbit_device_map, get_peft_config, get_quantization_config
 
 else:
     import sys

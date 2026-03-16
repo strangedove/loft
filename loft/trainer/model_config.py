@@ -185,12 +185,33 @@ class ModelConfig:
             "FSDP or DeepSpeed (which are incompatible with QLoRA)."
         },
     )
+    max_memory: Optional[dict] = field(
+        default=None,
+        metadata={
+            "help": "Per-device memory budget for model_parallel layer placement, e.g. "
+            '{0: "20GiB", 1: "22GiB"}. Passed to accelerate\'s infer_auto_device_map. '
+            "If not set and model_parallel is enabled, computed automatically to account "
+            "for training overhead (logits, gradients) on the last GPU."
+        },
+    )
     low_cpu_mem_usage: bool = field(
         default=True,
         metadata={
             "help": "Whether to use low CPU memory when loading the model. Set to False for models with custom "
             "activation functions that have learnable parameters (e.g., xielu) which don't work with meta tensors."
         },
+    )
+    use_chunked_dpo: bool = field(
+        default=False,
+        metadata={
+            "help": "Use vocab-chunked log-prob computation in DPO to avoid materializing "
+            "full [batch, seq, vocab] logits. Reduces peak memory ~30x for large-vocab "
+            "models (248K), enabling longer sequences. Trades ~10-20%% speed for memory."
+        },
+    )
+    chunked_dpo_size: int = field(
+        default=4096,
+        metadata={"help": "Vocab chunk size for chunked DPO log-prob computation."},
     )
     # Deprecated params
     torch_dtype: Optional[str] = field(
