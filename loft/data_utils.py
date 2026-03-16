@@ -1914,15 +1914,17 @@ def tokenize_sft_example(
             if "assistant_masks" in prompt_completion_processed:
                 output["assistant_masks"] = prompt_completion_processed["assistant_masks"]
 
-            # BETTER FALLBACK: If mask is missing or all zeros, compute from messages
+            # BETTER FALLBACK: If mask is missing, all zeros, or wrong length
             if need_assistant_masks:
                 asst_masks = output.get("assistant_masks", [])
-                if not asst_masks or sum(asst_masks) == 0:
-                    # Use the new robust message-based computation
+                if not asst_masks or sum(asst_masks) == 0 or len(asst_masks) != len(prompt_completion_ids):
+                    template_kwargs = {**example.get("chat_template_kwargs", {})}
+                    if example.get("tools"):
+                        template_kwargs["tools"] = example["tools"]
                     output["assistant_masks"] = compute_assistant_mask_from_messages(
-                        example["messages"],
+                        example["prompt"] + example["completion"],
                         processing_class,
-                        **example.get("chat_template_kwargs", {})
+                        **template_kwargs,
                     )
         else:  # plain text prompt-completion case
             prompt_ids = processing_class(example["prompt"], add_special_tokens=False)["input_ids"]
@@ -1947,15 +1949,20 @@ def tokenize_sft_example(
             processed = {k: v[0] if isinstance(v[0], list) else v for k, v in processed.items()}
             output = {k: processed[k] for k in ("input_ids", "assistant_masks") if k in processed}
 
-            # Fallback: if mask is missing or all zeros, compute from messages
+            # Fallback: if mask is missing, all zeros, or wrong length
+            # (wrong length happens when tools are present — the tokenizer's
+            # return_assistant_tokens_mask doesn't account for tool definition tokens)
             if need_assistant_masks:
                 asst_masks = output.get("assistant_masks", [])
-                if not asst_masks or sum(asst_masks) == 0:
-                    # Use the new robust message-based computation
+                input_ids = output.get("input_ids", [])
+                if not asst_masks or sum(asst_masks) == 0 or len(asst_masks) != len(input_ids):
+                    template_kwargs = {**example.get("chat_template_kwargs", {})}
+                    if example.get("tools"):
+                        template_kwargs["tools"] = example["tools"]
                     output["assistant_masks"] = compute_assistant_mask_from_messages(
                         example["messages"],
                         processing_class,
-                        **example.get("chat_template_kwargs", {})
+                        **template_kwargs,
                     )
         else:  # plain text case
             text = example.get(dataset_text_field, "")

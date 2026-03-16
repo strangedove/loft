@@ -836,9 +836,12 @@ def _vocab_chunked_tp_eos_loss(
     Returns:
         Scalar loss tensor.
     """
-    dev = h_ck.device
+    dev = w.device  # use lm_head device as canonical device
     V = w.shape[0]
-    h_f = h_ck.to(w.dtype)
+    h_f = h_ck.to(device=dev, dtype=w.dtype)
+    m_ck = m_ck.to(dev)
+    if te_ck is not None:
+        te_ck = te_ck.to(dev)
 
     # Streaming logsumexp over vocabulary chunks
     running_max = torch.full((h_ck.shape[0],), -1e10, device=dev, dtype=torch.float32)
@@ -1479,13 +1482,21 @@ class SFTTrainer(BaseTrainer):
             self._token_weight_vec = self._load_token_weights(args.token_weights, processing_class)
 
         # Set up hidden state capture for chunked aux loss computation.
-        # Needed when logits aren't materialized (Liger kernel or CCE).
+        # Needed when logits aren't materialized (Liger kernel or CCE), or when
+        # aux losses are enabled on large-vocab models where materializing the
+        # full (batch, seq, vocab) logits tensor for backward would OOM.
         self._liger_needs_chunked = False
         self._liger_hidden_capture = None
         needs_ls_correction = args.use_liger_kernel and (args.label_smoothing or 0) > 0
         has_token_weights = self._token_weight_vec is not None
         no_logits = args.use_liger_kernel or args.use_cce
         if no_logits and (has_any_aux_loss or needs_ls_correction or has_token_weights):
+            self._liger_needs_chunked = True
+            self._setup_liger_aux_hook()
+        elif has_any_aux_loss and not no_logits:
+            # Standard path: use chunked aux losses from hidden states to avoid
+            # keeping full logits alive during backward (critical for large vocabs
+            # like Qwen3.5's 248K where logits backward can exceed GPU memory).
             self._liger_needs_chunked = True
             self._setup_liger_aux_hook()
 
@@ -2418,14 +2429,17 @@ class SFTTrainer(BaseTrainer):
                             if "assistant_masks" in prompt_completion_processed:
                                 output["assistant_masks"] = prompt_completion_processed["assistant_masks"]
 
-                            # Fallback: if mask is missing or all zeros, compute from messages
+                            # Fallback: if mask is missing, all zeros, or wrong length
                             if need_assistant_masks:
                                 asst_masks = output.get("assistant_masks", [])
-                                if not asst_masks or sum(asst_masks) == 0:
+                                if not asst_masks or sum(asst_masks) == 0 or len(asst_masks) != len(prompt_completion_ids):
+                                    template_kwargs = {**example.get("chat_template_kwargs", {})}
+                                    if example.get("tools"):
+                                        template_kwargs["tools"] = example["tools"]
                                     output["assistant_masks"] = compute_assistant_mask_from_messages(
                                         example["prompt"] + example["completion"],
                                         processing_class,
-                                        **example.get("chat_template_kwargs", {}),
+                                        **template_kwargs,
                                     )
                         else:
                             prompt_ids = processing_class(text=example["prompt"])["input_ids"]
@@ -2463,14 +2477,18 @@ class SFTTrainer(BaseTrainer):
                             processed = {k: v[0] if isinstance(v[0], list) else v for k, v in processed.items()}
                             output = {k: processed[k] for k in ("input_ids", "assistant_masks") if k in processed}
 
-                            # Fallback: if mask is missing or all zeros, compute from messages
+                            # Fallback: if mask is missing, all zeros, or wrong length
                             if need_assistant_masks:
                                 asst_masks = output.get("assistant_masks", [])
-                                if not asst_masks or sum(asst_masks) == 0:
+                                input_ids = output.get("input_ids", [])
+                                if not asst_masks or sum(asst_masks) == 0 or len(asst_masks) != len(input_ids):
+                                    template_kwargs = {**example.get("chat_template_kwargs", {})}
+                                    if example.get("tools"):
+                                        template_kwargs["tools"] = example["tools"]
                                     output["assistant_masks"] = compute_assistant_mask_from_messages(
                                         example["messages"],
                                         processing_class,
-                                        **example.get("chat_template_kwargs", {}),
+                                        **template_kwargs,
                                     )
                         else:
                             output = {"input_ids": processing_class(text=example[dataset_text_field])["input_ids"]}
@@ -2673,7 +2691,7 @@ class SFTTrainer(BaseTrainer):
         logits_available = not self.args.use_liger_kernel and not self.args.use_cce
 
         if self._liger_needs_chunked and self._liger_hidden_capture is not None:
-            # Liger path: compute aux losses (and label smoothing correction) from hidden states
+            # Chunked path: compute aux losses from hidden states (avoids full logits backward)
             hidden_states = self._liger_hidden_capture.value
             if hidden_states is not None:
                 aux_total = self._compute_chunked_aux_losses(
@@ -2681,7 +2699,7 @@ class SFTTrainer(BaseTrainer):
                 )
                 # Guard: if aux losses produced NaN/Inf, skip adding them
                 if torch.isfinite(aux_total):
-                    loss = loss + aux_total
+                    loss = loss + aux_total.to(loss.device)
                 # Metrics (entropy, accuracy) are computed inside _compute_chunked_aux_losses
             self._liger_hidden_capture.value = None  # release hidden states
             self._liger_hidden_capture.lm_head_weight = None  # release weight clone
@@ -2725,7 +2743,9 @@ class SFTTrainer(BaseTrainer):
         # correction = sum((weight[target] - 1) * CE_per_position) / N
         # This works regardless of how the base loss was computed (default, label smoothing, Liger).
         if self._token_weight_vec is not None:
-            if logits_available:
+            if self._liger_needs_chunked:
+                pass  # handled in _compute_chunked_aux_losses_inner
+            elif logits_available:
                 logits = outputs.logits
                 shift_logits = logits[..., :-1, :].contiguous()
                 shift_labels = labels[..., 1:].contiguous().to(logits.device)
@@ -2748,11 +2768,9 @@ class SFTTrainer(BaseTrainer):
                         correction = ((per_pos_weight - 1.0) * per_pos_ce * mask.float()).sum()
                         correction = correction / mask.sum()
                         loss = loss + correction
-            elif self._liger_needs_chunked:
-                pass  # handled in _compute_chunked_aux_losses_inner
 
-        # Compute entropy (standard path only — Liger path computes entropy in _compute_chunked_aux_losses)
-        if logits_available:
+        # Compute entropy (standard path only — chunked path computes entropy in _compute_chunked_aux_losses)
+        if logits_available and not self._liger_needs_chunked:
             with torch.no_grad():
                 per_token_entropy = entropy_from_logits(outputs.logits)
                 # When using Prompt Tuning, skip the virtual tokens in logits before entropy computation, since they
@@ -2785,8 +2803,8 @@ class SFTTrainer(BaseTrainer):
             self._total_train_tokens += num_tokens_in_batch
         self._metrics[mode]["num_tokens"] = [self._total_train_tokens]
 
-        # Compute token accuracy (standard path only — Liger path computes accuracy in _compute_chunked_aux_losses)
-        if logits_available:
+        # Compute token accuracy (standard path only — chunked path computes accuracy in _compute_chunked_aux_losses)
+        if logits_available and not self._liger_needs_chunked:
             with torch.no_grad():
                 if "shift_labels" in inputs:
                     # When using CP, labels are pre-shifted. We must use these (and cannot manually shift) because:

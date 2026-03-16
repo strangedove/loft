@@ -1187,15 +1187,17 @@ def _process_single_dataset(
                 load_columns = dataset_config.columns
 
     try:
-        dataset = datasets.load_dataset(
+        load_kwargs = dict(
             path=load_path,
             name=dataset_config.name,
             data_dir=dataset_config.data_dir,
             data_files=load_data_files,
             split=dataset_config.split,
             streaming=mixture_config.streaming,
-            columns=load_columns,
         )
+        if load_columns is not None:
+            load_kwargs["columns"] = load_columns
+        dataset = datasets.load_dataset(**load_kwargs)
     except (TypeError, datasets.exceptions.DatasetGenerationError) as exc:
         if load_columns is not None:
             # columns kwarg may not be supported by the loader/version — retry without it
