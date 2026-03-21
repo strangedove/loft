@@ -213,6 +213,18 @@ class ModelConfig:
         default=4096,
         metadata={"help": "Vocab chunk size for chunked DPO log-prob computation."},
     )
+    chunked_mlp: bool = field(
+        default=False,
+        metadata={"help": "Chunk MLP forward pass along sequence dim for memory savings."},
+    )
+    chunked_mlp_chunks: int = field(
+        default=8,
+        metadata={"help": "Number of chunks for chunked MLP."},
+    )
+    activation_offloading: bool = field(
+        default=False,
+        metadata={"help": "Offload activations to CPU during training. Saves ~3-4GB/GPU, ~10%% slower."},
+    )
     # Deprecated params
     torch_dtype: Optional[str] = field(
         default=None,

@@ -86,11 +86,16 @@ class ChunkedPerTokenLogProbs(torch.autograd.Function):
         gathered_logits[labels_local == ignore_index] = 0.0
 
         # Save for backward — NOT the full logits tensor
-        ctx.save_for_backward(hidden_states, weight, labels, logsumexp.to(hidden_states.device))
+        # Track the output device explicitly — activation offloading may move
+        # hidden_states to CPU between forward and backward, but autograd
+        # expects gradients on the same device as the forward outputs.
+        output_device = hidden_states.device
+        ctx.save_for_backward(hidden_states, weight, labels, logsumexp.to(output_device))
         ctx.chunk_size = chunk_size
         ctx.ignore_index = ignore_index
+        ctx.output_device = output_device
 
-        return per_token_logps.to(hidden_states.device), gathered_logits.to(hidden_states.device)
+        return per_token_logps.to(output_device), gathered_logits.to(output_device)
 
     @staticmethod
     def backward(ctx, grad_output, _grad_gathered):
@@ -141,7 +146,9 @@ class ChunkedPerTokenLogProbs(torch.autograd.Function):
             del logits_chunk, softmax_chunk, grad_logits
 
         # 5 inputs to forward: hidden_states, weight, labels, chunk_size, ignore_index
-        return grad_hidden.to(hidden_states.device), None, None, None, None
+        # Use the saved output_device — hidden_states.device may differ after
+        # activation offloading moves tensors to CPU and back.
+        return grad_hidden.to(ctx.output_device), None, None, None, None
 
 
 def chunked_per_token_logps(hidden_states, weight, labels, chunk_size=4096, ignore_index=0):

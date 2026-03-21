@@ -405,9 +405,11 @@ def main(script_args, training_args, model_args):
             logger.info("Multi-GPU: keeping dispatch hooks from from_pretrained through PEFT")
 
     # Apply chunked MLP for memory-efficient long-context training
-    if getattr(training_args, "chunked_mlp", False):
+    _chunked_mlp = getattr(model_args, "chunked_mlp", False) or getattr(training_args, "chunked_mlp", False)
+    if _chunked_mlp:
         from loft.trainer.chunked_mlp import patch_mlp_chunking
-        n_patched = patch_mlp_chunking(model, num_chunks=getattr(training_args, "chunked_mlp_chunks", 8))
+        _chunks = getattr(model_args, "chunked_mlp_chunks", None) or getattr(training_args, "chunked_mlp_chunks", 8)
+        n_patched = patch_mlp_chunking(model, num_chunks=_chunks)
         logger.info(f"Applied chunked MLP: {n_patched} modules patched")
 
     ################
@@ -428,6 +430,20 @@ def main(script_args, training_args, model_args):
         cache_key = _ref_logprobs_cache_key(model_args, training_args, script_args.dataset_name)
         _patch_ref_logprob_caching(trainer, training_args.output_dir, cache_key)
         logger.info(f"Ref logprob cache key: {cache_key}")
+
+    # Apply activation offloading: wrap training_step so activations are offloaded to CPU
+    _act_offload = getattr(model_args, "activation_offloading", False) or getattr(training_args, "activation_offloading", False)
+    if _act_offload:
+        from loft.models.activation_offloading import get_act_offloading_ctx_manager
+        _offload_ctx = get_act_offloading_ctx_manager(model=model)
+        _orig_training_step = trainer.training_step
+
+        def _offloaded_training_step(*args, **kwargs):
+            with _offload_ctx:
+                return _orig_training_step(*args, **kwargs)
+
+        trainer.training_step = _offloaded_training_step
+        logger.info("Activation offloading enabled for DPO training")
 
     trainer.train()
 
