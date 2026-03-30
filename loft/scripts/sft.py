@@ -555,8 +555,27 @@ def main(script_args, training_args, model_args, dataset_args):
         peft_config=get_peft_config(model_args),
     )
 
-    # Train the model
-    trainer.train()
+    # Train the model — resume from checkpoint if available and requested
+    resume_ckpt = getattr(training_args, "resume_from_checkpoint", None)
+    # Handle string "true"/"false" from CLI/YAML
+    if isinstance(resume_ckpt, str) and resume_ckpt.lower() in ("true", "yes", "1"):
+        resume_ckpt = True
+    elif isinstance(resume_ckpt, str) and resume_ckpt.lower() in ("false", "no", "0", "none"):
+        resume_ckpt = None
+    if resume_ckpt is True:
+        # Auto-detect: find the latest checkpoint in output_dir
+        import glob
+        checkpoints = sorted(glob.glob(os.path.join(training_args.output_dir, "checkpoint-*")))
+        if checkpoints:
+            resume_ckpt = checkpoints[-1]
+            logger.info(f"Resuming from checkpoint: {resume_ckpt}")
+        else:
+            logger.info("No checkpoint found in output_dir, starting fresh")
+            resume_ckpt = None
+    elif resume_ckpt and isinstance(resume_ckpt, str):
+        logger.info(f"Resuming from specified checkpoint: {resume_ckpt}")
+
+    trainer.train(resume_from_checkpoint=resume_ckpt)
 
     trainer.save_model(training_args.output_dir)
     logger.info(f"Training completed. Model saved to {training_args.output_dir}.")

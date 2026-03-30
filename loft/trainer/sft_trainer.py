@@ -47,6 +47,7 @@ from ..data_utils import (
     add_system_message_to_example,
     apply_chat_template,
     apply_truncation_strategy_to_example,
+    apply_reasoning_mask,
     compute_assistant_mask_from_messages,
     convert_binary_preference_to_sft,
     convert_preference_to_sft,
@@ -2497,6 +2498,14 @@ class SFTTrainer(BaseTrainer):
                     if last_assistant_only_loss and "assistant_masks" in output:
                         output["assistant_masks"] = mask_to_last_segment_only(output["assistant_masks"])
 
+                    # Apply auto_mask_reasoning: smart masking for <think>...</think> blocks
+                    if getattr(args, "auto_mask_reasoning", False) and "assistant_masks" in output:
+                        output["assistant_masks"] = apply_reasoning_mask(
+                            output["assistant_masks"],
+                            output["input_ids"],
+                            processing_class,
+                        )
+
                     # Apply train_on_incomplete_assistant: remove trailing EOS if last role is assistant
                     if train_on_incomplete_assistant and last_role_is_assistant and eos_token_id is not None:
                         output["input_ids"] = remove_trailing_eos(output["input_ids"], eos_token_id)
@@ -2670,7 +2679,7 @@ class SFTTrainer(BaseTrainer):
         # replace with zero to skip this batch and prevent LoRA weight corruption.
         # Use `torch.where` instead of `new_zeros` to preserve the computation graph
         # (DeepSpeed requires grad_fn on the loss tensor for backward).
-        if not torch.isfinite(loss):
+        if not torch.isfinite(loss).all():
             n_ignore = (labels == -100).sum().item()
             n_total = labels.numel()
             logger.warning(

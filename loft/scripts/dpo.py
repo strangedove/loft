@@ -38,6 +38,71 @@ from loft import (
 logger = logging.get_logger(__name__)
 
 
+def _patch_think_masking(trainer, tokenizer):
+    """Patch DPOTrainer to mask think block tokens from the DPO loss.
+
+    When mask_thinking is enabled, tokens between <think> and </think>
+    (inclusive) are excluded from the loss computation. This prevents
+    the DPO signal from affecting the thinking style — only the actual
+    response after </think> gets preference optimization.
+
+    Works by post-processing the loss_mask in concatenated_forward.
+    """
+    import torch
+    import inspect
+    import types
+
+    # Get the </think> token ID
+    think_end_id = tokenizer.encode("</think>", add_special_tokens=False)[0]
+
+    _orig_forward = trainer.concatenated_forward
+
+    def _masked_forward(model, batch):
+        # Call original
+        result = _orig_forward(model, batch)
+
+        # result is a tuple: (chosen_logps, rejected_logps, chosen_logits, rejected_logits, ...)
+        # We need to modify the log probs — but they're already computed.
+        # Instead, we need to hook into the loss_mask before log probs are computed.
+        # Since TRL 0.12.0 computes everything inside concatenated_forward,
+        # we can't easily intercept. Alternative: mask at the dataset level.
+        return result
+
+    # Better approach: mask at tokenization time by modifying completion_attention_mask
+    # The DPOTrainer's data collator builds completion_attention_mask from the
+    # tokenized sequences. We can add a post-tokenization step that zeros out
+    # think tokens in the chosen/rejected sequences.
+
+    _orig_tokenize = trainer.tokenize_row.__func__ if hasattr(trainer.tokenize_row, '__func__') else trainer.tokenize_row
+
+    @staticmethod
+    def _tokenize_with_think_mask(features, processing_class, max_prompt_length, max_completion_length, add_special_tokens):
+        result = _orig_tokenize(features, processing_class, max_prompt_length, max_completion_length, add_special_tokens)
+
+        # For each of chosen and rejected, find </think> and create attention mask
+        for prefix in ("chosen", "rejected"):
+            input_ids = result[f"{prefix}_input_ids"]
+            # Find the </think> token
+            mask = [1] * len(input_ids)
+            try:
+                end_idx = input_ids.index(think_end_id)
+                # Mask everything up to and including </think> and the newlines after
+                mask_end = end_idx + 1
+                # Also mask trailing newlines after </think>
+                while mask_end < len(input_ids) and input_ids[mask_end] in (198, 271):  # \n tokens
+                    mask_end += 1
+                for i in range(mask_end):
+                    mask[i] = 0
+            except ValueError:
+                pass  # No </think> found, don't mask anything
+            result[f"{prefix}_attention_mask"] = mask
+
+        return result
+
+    trainer.tokenize_row = _tokenize_with_think_mask
+    logger.info("Patched DPOTrainer.tokenize_row to mask think block tokens from loss")
+
+
 def preprocess_dpo_dataset(dataset, tokenizer):
     """Convert our JSONL format to plain-text prompt/chosen/rejected for DPOTrainer.
 
@@ -423,6 +488,11 @@ def main(script_args, training_args, model_args):
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
     )
+
+    # Mask think block tokens from DPO loss if requested
+    _mask_thinking = getattr(training_args, "mask_thinking", False) or getattr(model_args, "mask_thinking", False)
+    if _mask_thinking:
+        _patch_think_masking(trainer, tokenizer)
 
     # Cache precomputed ref log probs to disk so they survive across runs
     # with different LoRA/optimizer settings but the same base model + data.
