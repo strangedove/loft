@@ -1,0 +1,92 @@
+# Combined DPO V2: antirep + style + thinking — on Marvin V2 base
+# 402 pairs, 1 epoch, beta=0.1, LR=5e-6
+# V2: think masking enabled, 63% of pairs have think blocks
+#
+# Usage:
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+#     python -m loft.scripts.dpo configs/qwen35-27b-combined-dpo/train-v2.yaml
+
+model_name_or_path: /home/aibox/loft-t5/runs/qwen35-27b-derestricted-full-marvin-seed/merged
+dataset_name: /home/aibox/loft-t5/dpo-gen/combined_dpo_v2.jsonl
+output_dir: runs/qwen35-27b-combined-dpo-v2
+
+# Mask think blocks from DPO loss
+mask_thinking: true
+
+# Attention
+attn_implementation: flash_attention_2
+
+# Precision & memory
+bf16: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+# Multi-GPU
+model_parallel: true
+max_memory:
+  0: "18GiB"
+  1: "18GiB"
+
+# Chunked MLP
+chunked_mlp: true
+chunked_mlp_chunks: 8
+
+# Context lengths
+max_length: 2048
+max_prompt_length: 512
+max_completion_length: 1536
+
+# Chunked DPO
+use_chunked_dpo: true
+chunked_dpo_size: 4096
+
+# Precompute ref log_probs
+precompute_ref_log_probs: true
+
+# Batching
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
+
+# QLoRA
+use_peft: true
+load_in_4bit: true
+bnb_4bit_quant_type: nf4
+lora_r: 32
+lora_alpha: 16
+lora_dropout: 0.0
+use_rslora: true
+lora_target_modules:
+  - in_proj_qkv
+  - in_proj_z
+  - in_proj_a
+  - in_proj_b
+  - out_proj
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+# DPO parameters
+beta: 0.1
+loss_type: sigmoid
+
+# Optimizer & schedule
+learning_rate: 5.0e-6
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+weight_decay: 0.0
+max_grad_norm: 1.0
+optim: paged_adamw_8bit
+num_train_epochs: 1
+
+# Logging & saving
+logging_steps: 1
+disable_tqdm: false
+save_strategy: epoch
+save_total_limit: 1
+report_to: none
+run_name: qwen35-27b-combined-dpo-v2
