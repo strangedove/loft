@@ -159,6 +159,53 @@ def _patch_dpo_memory_efficient_logprobs():
         )
 
 
+def _patch_triton_rl_kernels(trainer):
+    """Replace TRL's entropy and log_softmax with fused Triton kernels.
+
+    Provides ~5x speedup on entropy and ~3x on selective_log_softmax,
+    plus significant VRAM savings by never materializing full softmax tensors.
+
+    Adapted from Axolotl v0.16.0 (Apache 2.0).
+    """
+    try:
+        from loft.trainer.triton_rl_kernels import (
+            entropy_from_logits,
+            selective_log_softmax,
+            HAS_TRITON,
+        )
+        if not HAS_TRITON:
+            logger.info("Triton not available, skipping RL kernel patches")
+            return False
+    except ImportError:
+        logger.info("Triton RL kernels not found, skipping")
+        return False
+
+    import trl.trainer.dpo_trainer as _dpo_mod
+
+    # Patch selective_log_softmax into TRL if it uses one
+    if hasattr(_dpo_mod, 'selective_log_softmax'):
+        _dpo_mod.selective_log_softmax = selective_log_softmax
+        logger.info("Patched TRL selective_log_softmax with Triton kernel")
+
+    # Patch entropy_from_logits if used
+    if hasattr(_dpo_mod, 'entropy_from_logits'):
+        _dpo_mod.entropy_from_logits = entropy_from_logits
+        logger.info("Patched TRL entropy_from_logits with Triton kernel")
+
+    # Also patch in the trainer's utils module if it exists
+    try:
+        import trl.trainer.utils as _trl_utils
+        if hasattr(_trl_utils, 'selective_log_softmax'):
+            _trl_utils.selective_log_softmax = selective_log_softmax
+        if hasattr(_trl_utils, 'entropy_from_logits'):
+            _trl_utils.entropy_from_logits = entropy_from_logits
+    except ImportError:
+        pass
+
+    logger.info("Triton RL kernels patched successfully")
+    return True
+
+
 def _ref_logprobs_cache_key(model_args, training_args, dataset_path):
     """Build a hash key from factors that affect reference log probabilities.
 
@@ -488,6 +535,9 @@ def main(script_args, training_args, model_args):
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
     )
+
+    # Apply Triton RL kernels for faster entropy/log_softmax
+    _patch_triton_rl_kernels(trainer)
 
     # Mask think block tokens from DPO loss if requested
     _mask_thinking = getattr(training_args, "mask_thinking", False) or getattr(model_args, "mask_thinking", False)
