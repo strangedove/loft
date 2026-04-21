@@ -191,6 +191,10 @@ my-project/
   output/          # Training checkpoints and final model
 ```
 
+## Acknowledgements
+
+- ScatterMoE kernels (`loft/kernels/scattermoe/`) ported from [axolotl](https://github.com/axolotl-ai-collective/axolotl)'s `scattermoe_lora` integration, which itself builds on [shawntan/scattermoe](https://github.com/shawntan/scattermoe). Both Apache 2.0. See `loft/kernels/scattermoe/ATTRIBUTION.md` for modification details.
+
 ## License
 
 Apache 2.0

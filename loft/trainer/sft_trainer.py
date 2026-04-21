@@ -1457,11 +1457,45 @@ class SFTTrainer(BaseTrainer):
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         )
 
+        # HF Trainer wraps in nn.DataParallel whenever it sees >1 GPU (checked via
+        # args.n_gpu in _wrap_model). This is wrong for device-mapped (PEFT-wrapped
+        # or quantized) models — DP replicates full weights per GPU and broadcasts,
+        # which crashes on Params4bit / multi-device layouts with "NCCL Error 1".
+        # HF's own MP detection is gated on `hf_device_map` being visible on the
+        # top-level model arg, which PeftModel doesn't expose. Force n_gpu=1 here
+        # unconditionally — loft is a single-process trainer, DP was never wanted.
+        try:
+            import torch as _torch
+            if _torch.cuda.device_count() > 1 and getattr(self.args, "_n_gpu", 0) > 1:
+                self.args._n_gpu = 1
+                self.is_model_parallel = True
+                logger.info(
+                    "[loft] Forced args._n_gpu=1 and is_model_parallel=True to "
+                    "prevent HF Trainer's nn.DataParallel wrap (incompatible with "
+                    "QLoRA / device-mapped models)."
+                )
+        except Exception as _e:
+            logger.warning(f"[loft] post-init n_gpu override failed: {_e}")
+
         # Initialize activation offloading context
         if self.args.activation_offloading:
             self.maybe_activation_offload_context = get_act_offloading_ctx_manager(model=self.model)
         else:
             self.maybe_activation_offload_context = contextlib.nullcontext()
+
+        # Register rolling checkpoint callback if configured
+        if getattr(args, "rolling_save_steps", None) and args.rolling_save_steps > 0:
+            from .callbacks import RollingCheckpointCallback
+            rolling_cb = RollingCheckpointCallback(
+                trainer=self,
+                rolling_save_steps=args.rolling_save_steps,
+                rolling_save_total_limit=getattr(args, "rolling_save_total_limit", 1),
+            )
+            self.add_callback(rolling_cb)
+            logger.info(
+                f"Rolling checkpoints enabled: every {args.rolling_save_steps} steps, "
+                f"keeping {getattr(args, 'rolling_save_total_limit', 1)}"
+            )
 
         # Add tags for models that have been loaded with the correct transformers version
         if hasattr(self.model, "add_model_tags"):

@@ -429,6 +429,20 @@ class SFTConfig(TrainingArguments):
             )
         },
     )
+    auto_mask_reasoning: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Smart masking for <think>...</think> reasoning blocks in assistant turns. "
+                "When enabled:\n"
+                "  - Empty think blocks (<think>\\n\\n</think>): entire block is masked (not trained on)\n"
+                "  - Non-empty think blocks: the opening <think> tag is masked, but the trace content "
+                "and closing </think> tag are trained on. This teaches the model to close reasoning "
+                "blocks and transition to the response, per Darkhn's strategy.\n"
+                "Requires assistant_only_loss or completion_only_loss to be enabled."
+            )
+        },
+    )
     activation_offloading: bool = field(
         default=False,
         metadata={
@@ -459,6 +473,16 @@ class SFTConfig(TrainingArguments):
         metadata={
             "help": "Whether to use Cut Cross-Entropy (CCE) for memory-efficient cross-entropy loss computation. "
             "Requires: pip install cut-cross-entropy"
+        },
+    )
+    use_scattermoe: bool = field(
+        default=False,
+        metadata={
+            "help": "Apply ScatterMoE Triton kernels for accelerated MoE training. "
+            "Replaces MoE expert forward pass with fused scatter2scatter kernels. "
+            "Supports Gemma4, Qwen3-MoE, OLMoE, Mixtral, DeepSeek V3. "
+            "Expert weights are frozen; only LoRA adapters receive gradients. "
+            "Adapted from axolotl (Apache 2.0). Requires triton."
         },
     )
 
@@ -518,6 +542,23 @@ class SFTConfig(TrainingArguments):
             "help": "Number of times to evaluate per epoch. If set, automatically calculates eval_steps based on "
             "total training steps. Mutually exclusive with eval_steps when > 0. For example, evals_per_epoch=4 "
             "will evaluate 4 times per epoch."
+        },
+    )
+
+    # Rolling checkpoint settings
+    rolling_save_steps: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Save a rolling checkpoint every N steps. Rolling checkpoints are saved separately from "
+            "permanent checkpoints and automatically overwrite older rolling saves. Use this for frequent "
+            "crash recovery without consuming disk space. Set to 0 or None to disable."
+        },
+    )
+    rolling_save_total_limit: int = field(
+        default=1,
+        metadata={
+            "help": "Maximum number of rolling checkpoints to keep. Oldest rolling checkpoints are deleted "
+            "when this limit is exceeded. Default: 1 (single rolling checkpoint that overwrites itself)."
         },
     )
 

@@ -145,8 +145,10 @@ def compute_balanced_device_map(
         else:
             parts.append(f"GPU {d}: {len(mods)} modules")
     logger.info(f"Computed balanced device_map: {' | '.join(parts)}")
+    print(f"Computed balanced device_map: {' | '.join(parts)}", flush=True)
     if max_memory is not None:
         logger.info(f"  max_memory={max_memory}")
+        print(f"  max_memory={max_memory}", flush=True)
 
     return device_map
 

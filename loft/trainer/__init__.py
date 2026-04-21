@@ -8,6 +8,7 @@ _import_structure = {
         "LogCompletionsCallback",
         "MergeModelCallback",
         "RichProgressCallback",
+        "RollingCheckpointCallback",
     ],
     "model_config": ["ModelConfig"],
     "sft_config": ["SFTConfig"],
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
         LogCompletionsCallback,
         MergeModelCallback,
         RichProgressCallback,
+        RollingCheckpointCallback,
     )
     from .model_config import ModelConfig
     from .sft_config import SFTConfig

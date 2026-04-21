@@ -1843,6 +1843,89 @@ def compute_assistant_mask_from_messages(
 
     return mask
 
+
+def apply_reasoning_mask(
+    mask: list[int],
+    input_ids: list[int],
+    tokenizer,
+) -> list[int]:
+    """Post-process an assistant mask to handle <think>...</think> reasoning blocks.
+
+    For empty think blocks (``<think>\\n\\n</think>``): masks the entire block.
+    For non-empty think blocks: masks the opening ``<think>\\n`` tokens but keeps
+    the trace content and ``</think>`` trainable.  This teaches the model to
+    close reasoning blocks and transition to the response.
+
+    Args:
+        mask: Existing assistant mask (1 = trainable, 0 = masked).
+        input_ids: Token IDs for the full sequence.
+        tokenizer: The tokenizer, used to encode marker strings.
+
+    Returns:
+        Modified mask with reasoning blocks handled.
+    """
+    # Encode the markers we need to find
+    # Use encode() to get token IDs for the think tags
+    think_open_text = "<think>\n"
+    think_close_text = "</think>"
+    think_empty_text = "<think>\n\n</think>"
+
+    # Tokenize markers (strip any BOS the tokenizer might add)
+    def _encode(text: str) -> list[int]:
+        ids = tokenizer.encode(text, add_special_tokens=False)
+        return ids
+
+    think_open_ids = _encode(think_open_text)
+    think_close_ids = _encode(think_close_text)
+    think_empty_ids = _encode(think_empty_text)
+
+    mask = list(mask)  # ensure mutable copy
+    n = len(input_ids)
+
+    def _find_subseq(haystack, needle, start=0):
+        """Find first occurrence of needle in haystack starting at start."""
+        nlen = len(needle)
+        for i in range(start, len(haystack) - nlen + 1):
+            if haystack[i:i + nlen] == needle:
+                return i
+        return -1
+
+    # Scan through the sequence looking for think blocks within assistant turns
+    pos = 0
+    while pos < n:
+        # Look for <think>\n starting at pos
+        idx = _find_subseq(input_ids, think_open_ids, pos)
+        if idx == -1:
+            break
+
+        # Only process if this position is within an assistant turn (mask[idx] == 1)
+        if mask[idx] == 0:
+            pos = idx + 1
+            continue
+
+        # Check if this is an empty think block
+        empty_idx = _find_subseq(input_ids, think_empty_ids, idx)
+        if empty_idx == idx:
+            # Empty think block — mask the entire block
+            block_end = idx + len(think_empty_ids)
+            for j in range(idx, min(block_end, n)):
+                mask[j] = 0
+            pos = block_end
+        else:
+            # Non-empty think block — mask only the opening <think>\n tag
+            tag_end = idx + len(think_open_ids)
+            for j in range(idx, min(tag_end, n)):
+                mask[j] = 0
+            # Find the closing </think> — it stays trainable (mask already 1)
+            close_idx = _find_subseq(input_ids, think_close_ids, tag_end)
+            if close_idx != -1:
+                pos = close_idx + len(think_close_ids)
+            else:
+                pos = tag_end
+
+    return mask
+
+
 def remove_trailing_eos(input_ids: list[int], eos_token_id: int) -> list[int]:
     """Remove trailing EOS token(s) from *input_ids*."""
     while input_ids and input_ids[-1] == eos_token_id:

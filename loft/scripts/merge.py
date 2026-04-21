@@ -189,8 +189,8 @@ def merge(
             for key in f.keys():
                 tensor = f.get_tensor(key)
                 # Strip model prefix for LoRA key lookup (composite models may
-                # have 'model.' or 'language_model.' prefixes)
-                lora_key_lookup = re.sub(r"^(model|language_model)\.", "", key)
+                # have 'model.', 'language_model.', or 'model.language_model.' prefixes)
+                lora_key_lookup = re.sub(r"^(model\.language_model|model|language_model)\.", "", key)
 
                 lora_A, lora_B = _find_lora_weights(lora_key_lookup, lora_state)
                 if lora_A is not None:

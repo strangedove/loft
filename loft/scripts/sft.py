@@ -240,6 +240,33 @@ def main(script_args, training_args, model_args, dataset_args):
             # Fallback to auto if compute_balanced_device_map returned None (single GPU)
             model_kwargs["device_map"] = "auto"
 
+    # ScatterMoE — ExpertsInterface models (Gemma4, etc.) must have their
+    # implementation registered and `_experts_implementation` set on the config
+    # BEFORE from_pretrained, so the experts are materialized directly into the
+    # scattermoe layout instead of the stock fused 3D tensors. The latter OOMs
+    # at bf16 during weight load even with 4-bit quant requested, because the
+    # dequant hook fires after materialize_copy.
+    if training_args.use_scattermoe:
+        from loft.kernels.scattermoe.patch import EXPERTS_INTERFACE_MODELS
+
+        # Resolve the LM model_type (VLMs expose it via text_config).
+        _mt = getattr(getattr(config, "text_config", None), "model_type", None) \
+            or getattr(config, "model_type", None)
+        if _mt in EXPERTS_INTERFACE_MODELS:
+            from loft.kernels.scattermoe.gemma4_experts import register_scattermoe_experts
+
+            register_scattermoe_experts()
+            config._experts_implementation = "scattermoe"
+            _tc = getattr(config, "text_config", None)
+            if _tc is not None:
+                _tc._experts_implementation = "scattermoe"
+            # Ensure the modified config is used by from_pretrained.
+            model_kwargs["config"] = config
+            logger.info(
+                f"ScatterMoE: pre-registered ExpertsInterface for {_mt} "
+                f"(config._experts_implementation=scattermoe)"
+            )
+
     if config.architectures and any(arch in valid_image_text_architectures for arch in config.architectures):
         from transformers import AutoModelForImageTextToText
 
@@ -482,6 +509,18 @@ def main(script_args, training_args, model_args, dataset_args):
             f"Applied chunked MLP: {n_patched} modules patched with "
             f"{training_args.chunked_mlp_chunks} chunks"
         )
+
+    # Apply ScatterMoE kernel patches for accelerated MoE training.
+    # Replaces MoE expert forward with fused Triton scatter2scatter kernels.
+    # Must be applied after model loading but before trainer init.
+    # Adapted from axolotl (Apache 2.0, https://github.com/axolotl-ai-collective/axolotl)
+    if training_args.use_scattermoe:
+        from loft.kernels.scattermoe.patch import patch_scattermoe
+        success = patch_scattermoe(model)
+        if success:
+            logger.info("Applied ScatterMoE kernel patches")
+        else:
+            logger.warning("ScatterMoE patching failed — continuing without acceleration")
 
     # Load the dataset
     if training_args.prepared_dataset:

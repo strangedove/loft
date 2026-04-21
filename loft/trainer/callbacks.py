@@ -744,6 +744,81 @@ class WeaveCallback(TrainerCallback):
         self._last_logged_step = state.global_step
 
 
+class RollingCheckpointCallback(TrainerCallback):
+    """Saves lightweight rolling checkpoints on a separate schedule from permanent checkpoints.
+
+    Rolling checkpoints save only model weights (adapter weights for LoRA), not optimizer/scheduler
+    state, making them fast and small. They're intended for crash recovery — if training dies between
+    permanent checkpoints, the rolling checkpoint lets you recover recent progress.
+
+    Rolling checkpoints use a ``rolling-checkpoint-{step}`` naming convention and are managed
+    independently from the permanent ``checkpoint-{step}`` directories controlled by ``save_steps``
+    and ``save_total_limit``.
+
+    Args:
+        trainer: The Trainer instance (needed to call ``save_model``).
+        rolling_save_steps: Save a rolling checkpoint every N steps.
+        rolling_save_total_limit: Max rolling checkpoints to keep (default 1).
+    """
+
+    ROLLING_PREFIX = "rolling-checkpoint"
+
+    def __init__(self, trainer: Trainer, rolling_save_steps: int, rolling_save_total_limit: int = 1):
+        self.trainer = trainer
+        self.rolling_save_steps = rolling_save_steps
+        self.rolling_save_total_limit = rolling_save_total_limit
+
+    def _get_rolling_checkpoints(self, output_dir: str) -> list[str]:
+        """Return existing rolling checkpoint dirs sorted by step number (ascending)."""
+        if not os.path.isdir(output_dir):
+            return []
+        rolling_dirs = []
+        for name in os.listdir(output_dir):
+            if name.startswith(self.ROLLING_PREFIX) and os.path.isdir(os.path.join(output_dir, name)):
+                try:
+                    step = int(name.split("-")[-1])
+                    rolling_dirs.append((step, name))
+                except ValueError:
+                    continue
+        rolling_dirs.sort(key=lambda x: x[0])
+        return [os.path.join(output_dir, name) for _, name in rolling_dirs]
+
+    def _rotate_rolling_checkpoints(self, output_dir: str):
+        """Delete oldest rolling checkpoints beyond the limit."""
+        import shutil
+        checkpoints = self._get_rolling_checkpoints(output_dir)
+        while len(checkpoints) > self.rolling_save_total_limit:
+            oldest = checkpoints.pop(0)
+            logger.info(f"Deleting old rolling checkpoint: {oldest}")
+            shutil.rmtree(oldest, ignore_errors=True)
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if state.global_step == 0 or state.global_step % self.rolling_save_steps != 0:
+            return
+
+        # Skip if a permanent checkpoint is also being saved at this step (avoid redundancy)
+        if control.should_save:
+            return
+
+        if not args.should_save:
+            return
+
+        rolling_dir = os.path.join(args.output_dir, f"{self.ROLLING_PREFIX}-{state.global_step}")
+        logger.info(f"Saving rolling checkpoint at step {state.global_step} → {rolling_dir}")
+        self.trainer.save_model(rolling_dir)
+
+        # Save trainer state for step tracking (small JSON, useful for resumption info)
+        if hasattr(state, "save_to_json"):
+            state.save_to_json(os.path.join(rolling_dir, "trainer_state.json"))
+
+        self._rotate_rolling_checkpoints(args.output_dir)
+
+    def on_save(self, args, state, control, **kwargs):
+        """When a permanent checkpoint is saved, clean up any rolling checkpoints at the same step."""
+        # The permanent checkpoint supersedes any rolling checkpoint, so just rotate as normal
+        self._rotate_rolling_checkpoints(args.output_dir)
+
+
 class BEMACallback(TrainerCallback):
     # docstyle-ignore
     r"""
