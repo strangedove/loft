@@ -1,7 +1,6 @@
 """Custom scattermoe-native LoRA for MoE experts modules (Gemma4 and similar).
 
-Why this exists (duplicate of discord-project/gemma4_moe_custom_lora.py, promoted
-into loft for DPO integration):
+Why this exists:
 
 PEFT 0.18.1's ``target_parameters`` wraps each expert module in a ParamWrapper
 and materializes the full 3D delta weight via einsum in ``_activate_lora`` on

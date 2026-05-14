@@ -526,10 +526,8 @@ def main(script_args, training_args, model_args):
     # The SFT pipeline creates a pre-quantized fused cache at
     # ``<model_dir>/experts_nf4_packed.safetensors + base.safetensors + quant_states.pkl``
     # that avoids the bf16 on-the-fly bnb path (which doesn't fit Gemma4 26B-A4B
-    # on 2x3090). Delegate to the discord-project loader when that layout is
-    # detected and scattermoe is requested. This skips the normal
-    # from_pretrained + compute_balanced_device_map path and hands back a model
-    # already distributed across GPUs via manual .to() moves.
+    # on 2x3090). This skips the normal from_pretrained + compute_balanced_device_map
+    # path and hands back a model already distributed across GPUs via manual .to() moves.
     _fused_cache_marker = os.path.join(model_args.model_name_or_path, "experts_nf4_packed.safetensors")
     _use_fused_cache = getattr(model_args, "use_scattermoe", False) and os.path.isfile(_fused_cache_marker)
     if _use_fused_cache:
@@ -537,10 +535,7 @@ def main(script_args, training_args, model_args):
             f"Detected fused-scattermoe NF4 cache at {model_args.model_name_or_path}; "
             f"delegating to load_fused_quantized_gemma4 (bypasses generic from_pretrained)"
         )
-        # The loader currently lives alongside the SFT pipeline; add its dir to
-        # sys.path so we can import without copying the file.
-        sys.path.insert(0, "/home/aibox/discord-project")
-        from gemma4_moe_scattermoe_load import load_fused_quantized_gemma4
+        from loft.kernels.scattermoe.gemma4_loader import load_fused_quantized_gemma4
 
         _model_dtype_t = torch.bfloat16 if model_dtype in (None, "auto", "bfloat16") else torch.float16
         model, _fused_tokenizer = load_fused_quantized_gemma4(
