@@ -152,23 +152,90 @@ def scattermoe_experts_forward(
         top_k_index, num_experts=self.num_experts
     )
 
-    # Get base weights (unwrap PEFT if needed)
-    gate_up_weight = _get_base_param(self.gate_up_proj).transpose(2, 1)
-    down_weight = _get_base_param(self.down_proj).transpose(2, 1)
+    # Detect bnb NF4 parametrization (applied via bitsandbytes.nn.parametrize
+    # replace_parameter_4bit on the 3D gate_up_proj / down_proj).
+    # Set LOFT_SCATTERMOE_FULL_DEQUANT=1 to force full dequant (simpler,
+    # slower because all 128 experts are dequantized each forward instead of
+    # only the routed ones).
+    import os as _os
+    use_selective = (
+        hasattr(self, "parametrizations")
+        and (
+            "gate_up_proj" in getattr(self, "parametrizations", {})
+            or "down_proj" in getattr(self, "parametrizations", {})
+        )
+        and not _os.environ.get("LOFT_SCATTERMOE_FULL_DEQUANT")
+    )
 
-    # Extract LoRA params if PEFT is active
+    # Extract LoRA params. Priority:
+    #  1. Custom scattermoe-native attrs attached by
+    #     ``loft.kernels.scattermoe.custom_lora.attach_scattermoe_lora``
+    #     (bypasses PEFT materialization — recommended path for Gemma4 NF4).
+    #     Respects the ``_scmoe_lora_disabled`` flag so DPO's reference
+    #     forward (run inside ``disable_scmoe_lora(model)``) sees the base
+    #     experts only.
+    #  2. PEFT ParamWrapper at the PARAMETER level (legacy layout, unused
+    #     with PEFT 0.18.1 since it wraps at the MODULE level instead).
     gup_lora, down_lora = None, None
-    if _has_peft_wrapper(self):
+    _scmoe_disabled = getattr(self, "_scmoe_lora_disabled", False)
+    if hasattr(self, "_scmoe_lora_A_gate_up") and not _scmoe_disabled:
+        gup_lora = (
+            self._scmoe_lora_A_gate_up,
+            self._scmoe_lora_B_gate_up,
+            float(self._scmoe_lora_scaling_gate_up.item()),
+        )
+        down_lora = (
+            self._scmoe_lora_A_down,
+            self._scmoe_lora_B_down,
+            float(self._scmoe_lora_scaling_down.item()),
+        )
+    elif _has_peft_wrapper(self):
         _, gup_lora, down_lora = _unwrap_experts_lora(self)
+
+    if use_selective:
+        # NF4 path: only dequant + use experts routed to by this batch
+        from .selective_dequant import (
+            get_active_experts,
+            remap_expert_indices,
+            selective_expert_weights,
+            selective_lora_weights,
+        )
+
+        active = get_active_experts(sorted_expert_idxs, self.num_experts)
+        remapped_idxs, compact_offsets = remap_expert_indices(
+            sorted_expert_idxs, expert_offsets, active, self.num_experts
+        )
+
+        # Memory optimization: dequant gate_up_proj first, use it, free it,
+        # THEN dequant down_proj. Holding both simultaneously doubles peak
+        # scratch memory per layer (~1 GB each at seq=4096, 128 active experts).
+        gate_up_weight = selective_expert_weights(self, "gate_up_proj", active).transpose(2, 1)
+
+        # Slice LoRA to active experts so indices align with the compact weight
+        if gup_lora is not None:
+            A, B, scaling = gup_lora
+            A, B = selective_lora_weights(A, B, active, self.num_experts)
+            gup_lora = (A, B, scaling)
+
+        sei = remapped_idxs
+        eo = compact_offsets
+        _selective_down_pending = True
+    else:
+        # Dense path: full 3D weight + original indexing
+        gate_up_weight = _get_base_param(self.gate_up_proj).transpose(2, 1)
+        down_weight = _get_base_param(self.down_proj).transpose(2, 1)
+        sei = sorted_expert_idxs
+        eo = expert_offsets
+        _selective_down_pending = False
 
     # Gate-up projection (with optional LoRA)
     gates_h = _parallel_linear_maybe_lora(
         hidden_states,
         gate_up_weight,
         K,
-        sorted_expert_idxs,
+        sei,
         sorted_scattered_idxs,
-        expert_offsets,
+        eo,
         gup_lora,
         grouped_in=False,
         grouped_out=True,
@@ -176,14 +243,28 @@ def scattermoe_experts_forward(
     gates, h = gates_h.chunk(2, dim=-1)
     h = self.act_fn(gates) * h
 
+    # Free gate_up scratch BEFORE dequantizing down (selective NF4 path only).
+    # These refs hold the full dequantized [E_active, 2*I, H] tensor alive;
+    # without explicit del, peak memory = gate_up + down simultaneously.
+    del gate_up_weight, gates, gates_h
+    if _selective_down_pending:
+        if gup_lora is not None:
+            del gup_lora
+        # Now safe to dequant down_proj
+        down_weight = selective_expert_weights(self, "down_proj", active).transpose(2, 1)
+        if down_lora is not None:
+            A, B, scaling = down_lora
+            A, B = selective_lora_weights(A, B, active, self.num_experts)
+            down_lora = (A, B, scaling)
+
     # Down projection (with optional LoRA + routing weights)
     output = _parallel_linear_maybe_lora(
         h,
         down_weight,
         1,
-        sorted_expert_idxs,
+        sei,
         sorted_scattered_idxs,
-        expert_offsets,
+        eo,
         down_lora,
         grouped_in=True,
         grouped_out=False,

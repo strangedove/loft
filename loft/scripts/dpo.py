@@ -22,6 +22,15 @@ import numpy as np
 from accelerate import logging
 from datasets import load_dataset
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+# Must run BEFORE importing trl: TRL references transformers symbols that
+# were renamed / removed in transformers 5.x, and llm_blender (pulled in
+# eagerly by TRL's judges module) imports one of them. The shim installs
+# aliases if missing.
+from loft.patches.trl_compat import patch_trl_imports
+
+patch_trl_imports()
+
 from trl import DPOConfig, DPOTrainer
 
 from loft import (
@@ -227,6 +236,82 @@ def _ref_logprobs_cache_key(model_args, training_args, dataset_path):
     return hashlib.sha256(key_json.encode()).hexdigest()[:16]
 
 
+def _patch_scmoe_lora_null_ref_context(trainer, model):
+    """Wrap DPOTrainer.null_ref_context so the reference forward also disables scmoe_lora.
+
+    PEFT's ``disable_adapter()`` context toggles its own ``lora_`` params, but
+    knows nothing about the plain-nn.Parameter scmoe_lora attachments on MoE
+    experts. Without this patch the reference forward would still apply the
+    expert-LoRA delta → corrupted KL anchor, broken DPO objective.
+
+    Composes both contexts — enters disable_adapter() first (existing
+    behavior), then disable_scmoe_lora() inside it.
+    """
+    from contextlib import contextmanager
+    from loft.kernels.scattermoe.custom_lora import disable_scmoe_lora, has_scmoe_lora
+
+    if not has_scmoe_lora(model):
+        logger.info("No scmoe_lora attached; skipping null_ref_context patch")
+        return False
+
+    _orig_null_ref = trainer.null_ref_context
+
+    @contextmanager
+    def _null_ref_with_scmoe_disabled():
+        # The original context handles PEFT adapter disable + ref_adapter_name
+        # switching; nest our scmoe disable inside so both are active for the
+        # reference forward.
+        with _orig_null_ref():
+            with disable_scmoe_lora(model):
+                yield
+
+    trainer.null_ref_context = _null_ref_with_scmoe_disabled
+    logger.info(
+        "Patched DPOTrainer.null_ref_context to also disable scmoe_lora during "
+        "reference forward (composes with PEFT disable_adapter)"
+    )
+    return True
+
+
+def _save_scmoe_lora_sidecar(trainer, model, output_dir):
+    """Save scmoe_lora tensors alongside the PEFT adapter at training end.
+
+    ``trainer.save_model`` only persists PEFT's adapter_model.safetensors;
+    the plain-parameter scmoe_lora attachments are invisible to it.
+    """
+    from loft.kernels.scattermoe.custom_lora import save_scmoe_lora, has_scmoe_lora
+
+    if not has_scmoe_lora(model):
+        return
+    import os as _os
+    path = _os.path.join(output_dir, "scmoe_lora.safetensors")
+    save_scmoe_lora(model, path)
+    logger.info(f"Saved scmoe_lora sidecar to {path}")
+
+
+def _install_scmoe_lora_checkpoint_callback(trainer, model):
+    """Install a TrainerCallback that drops a ``scmoe_lora.safetensors`` sidecar
+    next to every HF checkpoint (so intermediate + rolling checkpoints are
+    complete, not just the final save).
+    """
+    from transformers import TrainerCallback
+    from loft.kernels.scattermoe.custom_lora import save_scmoe_lora, has_scmoe_lora
+    import os as _os
+
+    if not has_scmoe_lora(model):
+        return
+
+    class _ScmoeLoraCheckpointCallback(TrainerCallback):
+        def on_save(self, args, state, control, **kwargs):
+            ckpt = _os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+            if not _os.path.isdir(ckpt):
+                return
+            save_scmoe_lora(model, _os.path.join(ckpt, "scmoe_lora.safetensors"))
+
+    trainer.add_callback(_ScmoeLoraCheckpointCallback())
+    logger.info("Installed scmoe_lora checkpoint sidecar callback")
+
+
 def _patch_ref_logprob_caching(trainer, cache_dir, cache_key):
     """Patch DPOTrainer to save/load precomputed ref log probs from disk."""
     cache_path = Path(cache_dir) / "ref_logprobs" / cache_key
@@ -401,9 +486,130 @@ def main(script_args, training_args, model_args):
             model_kwargs["config"] = config
         os.environ.setdefault("HF_DEACTIVATE_ASYNC_LOAD", "1")
 
+    # ScatterMoE — ExpertsInterface models (Gemma4, etc.) must have their
+    # implementation registered and `_experts_implementation` set on the
+    # config BEFORE from_pretrained, so experts are materialized directly
+    # into the scattermoe layout instead of the stock fused 3D tensors.
+    # Mirrors the SFT path in loft/scripts/sft.py.
+    if getattr(model_args, "use_scattermoe", False):
+        from loft.kernels.scattermoe.patch import EXPERTS_INTERFACE_MODELS
+
+        _tc_full = getattr(full_config, "text_config", None)
+        _mt = getattr(_tc_full, "model_type", None) or getattr(full_config, "model_type", None)
+        if _mt in EXPERTS_INTERFACE_MODELS:
+            from loft.kernels.scattermoe.gemma4_experts import register_scattermoe_experts
+
+            register_scattermoe_experts()
+            # Set on BOTH the top-level composite config and the text sub-config
+            # so inner text layers pick up the scattermoe implementation.
+            full_config._experts_implementation = "scattermoe"
+            if _tc_full is not None:
+                _tc_full._experts_implementation = "scattermoe"
+            # For composite VL checkpoints (Gemma4ForConditionalGeneration),
+            # the weights are keyed as ``model.language_model.layers.*``. We
+            # MUST pass the full composite config so AutoModelForCausalLM
+            # materializes the composite architecture whose parameter layout
+            # matches — passing text_config alone builds the inner text-only
+            # model with ``model.layers.*`` keys and every param ends up
+            # reinitialized from meta (see _move_missing_keys_from_meta_to_device
+            # OOM observed on Gemma4 26B-A4B-it).
+            model_kwargs["config"] = full_config
+            config = full_config  # meta-model build + device-map use full config
+            logger.info(
+                f"ScatterMoE: pre-registered ExpertsInterface for {_mt} "
+                f"(config._experts_implementation=scattermoe, using full composite config)"
+            )
+
     import torch
 
-    if model_args.model_parallel and torch.cuda.device_count() > 1:
+    # --- Fused-scattermoe NF4 cache fast path ---
+    # The SFT pipeline creates a pre-quantized fused cache at
+    # ``<model_dir>/experts_nf4_packed.safetensors + base.safetensors + quant_states.pkl``
+    # that avoids the bf16 on-the-fly bnb path (which doesn't fit Gemma4 26B-A4B
+    # on 2x3090). Delegate to the discord-project loader when that layout is
+    # detected and scattermoe is requested. This skips the normal
+    # from_pretrained + compute_balanced_device_map path and hands back a model
+    # already distributed across GPUs via manual .to() moves.
+    _fused_cache_marker = os.path.join(model_args.model_name_or_path, "experts_nf4_packed.safetensors")
+    _use_fused_cache = getattr(model_args, "use_scattermoe", False) and os.path.isfile(_fused_cache_marker)
+    if _use_fused_cache:
+        logger.info(
+            f"Detected fused-scattermoe NF4 cache at {model_args.model_name_or_path}; "
+            f"delegating to load_fused_quantized_gemma4 (bypasses generic from_pretrained)"
+        )
+        # The loader currently lives alongside the SFT pipeline; add its dir to
+        # sys.path so we can import without copying the file.
+        sys.path.insert(0, "/home/aibox/discord-project")
+        from gemma4_moe_scattermoe_load import load_fused_quantized_gemma4
+
+        _model_dtype_t = torch.bfloat16 if model_dtype in (None, "auto", "bfloat16") else torch.float16
+        model, _fused_tokenizer = load_fused_quantized_gemma4(
+            model_id=model_args.model_name_or_path,
+            dtype=_model_dtype_t,
+            register_smoe=True,
+            use_cache=True,
+            save_cache=False,
+        )
+        # Match the sdpa / flash_attention_2 user selection (the loader respects
+        # GEMMA4_ATTN_IMPL env var; the config attr was already applied at build).
+        if model_args.attn_implementation:
+            try:
+                model.config._attn_implementation = model_args.attn_implementation
+                _tc_m = getattr(model.config, "text_config", None)
+                if _tc_m is not None:
+                    _tc_m._attn_implementation = model_args.attn_implementation
+            except Exception:  # pragma: no cover
+                pass
+        # Build a synthetic hf_device_map reflecting the manual split so the
+        # Trainer recognizes model_parallel.
+        devices = sorted({str(p.device) for p in model.parameters()})
+        model.hf_device_map = {f"layer_{i}": d for i, d in enumerate(devices)}
+        # PreTrainedModel normally initializes these via __init__; the fused
+        # loader builds from init_empty_weights + from_config + to_empty and
+        # skips that path, leaving a few attributes missing. Set the ones TRL
+        # / Trainer rely on.
+        if not hasattr(model, "warnings_issued"):
+            model.warnings_issued = {}
+
+        # Gemma4ForConditionalGeneration.forward → inner text model requires
+        # ``mm_token_type_ids`` whenever the model is in training mode (so the
+        # vision/text bidirectional mask can be built). For text-only DPO no
+        # image tokens are present — inject zeros when the caller omits it.
+        # Wrapping the composite forward (not the inner .model) ensures TRL's
+        # PEFT+model_parallel path reaches us before the inner training-mode
+        # guard fires.
+        _orig_gemma4_forward = model.forward
+
+        # The manual split places embed_tokens / lm_head on cuda:0 but there's
+        # no accelerate dispatch hook on the top-level model to move incoming
+        # tensors from CPU. Trainer feeds the model CPU batches assuming the
+        # inner hooks will place them. Move any CPU tensors up-front so embed
+        # / attention-mask / labels all land on cuda:0.
+        _entry_device = torch.device("cuda:0")
+
+        def _to_entry(v):
+            if isinstance(v, torch.Tensor) and v.device != _entry_device:
+                return v.to(_entry_device)
+            return v
+
+        def _gemma4_text_only_forward(*_f_args, **_f_kwargs):
+            _f_args = tuple(_to_entry(a) for a in _f_args)
+            _f_kwargs = {k: _to_entry(v) for k, v in _f_kwargs.items()}
+            if _f_kwargs.get("mm_token_type_ids") is None and "mm_token_type_ids" not in _f_kwargs:
+                _ids = _f_kwargs.get("input_ids")
+                if _ids is None and _f_args:
+                    _ids = _f_args[0]
+                if _ids is not None and hasattr(_ids, "dtype"):
+                    _f_kwargs["mm_token_type_ids"] = torch.zeros_like(_ids)
+            return _orig_gemma4_forward(*_f_args, **_f_kwargs)
+
+        model.forward = _gemma4_text_only_forward
+        logger.info(
+            "Installed text-only forward wrapper on Gemma4ForConditionalGeneration "
+            "(injects mm_token_type_ids=zeros when missing)"
+        )
+
+    elif model_args.model_parallel and torch.cuda.device_count() > 1:
         # Compute an explicit balanced device map from a meta model.  We can't rely on
         # device_map="auto"/"balanced" because BnB 4-bit quantization shrinks the model
         # enough to fit on one GPU, causing accelerate to skip multi-GPU distribution.
@@ -432,7 +638,8 @@ def main(script_args, training_args, model_args):
         del _meta_model
         model_kwargs["device_map"] = _device_map
 
-    model = AutoModelForCausalLM.from_pretrained(model_args.model_name_or_path, **model_kwargs)
+    if not _use_fused_cache:
+        model = AutoModelForCausalLM.from_pretrained(model_args.model_name_or_path, **model_kwargs)
 
     # When using model_parallel with device_map, accelerate's dispatch_model installs
     # hooks that move the model's output back to the input device (GPU 0).  For
@@ -516,6 +723,45 @@ def main(script_args, training_args, model_args):
         if model_args.model_parallel and torch.cuda.device_count() > 1:
             logger.info("Multi-GPU: keeping dispatch hooks from from_pretrained through PEFT")
 
+    # --- scattermoe-native LoRA for MoE experts (Gemma4 etc) ---
+    # Attached AFTER get_peft_model so the base model has the PEFT adapter
+    # installed on attn targets. scmoe_lora lives as plain nn.Parameters on
+    # experts modules, sidestepping PEFT's target_parameters path (which
+    # OOMs on 26B-A4B). The reference forward in DPO disables both PEFT
+    # adapters and scmoe_lora via the composed null_ref_context patch
+    # installed below.
+    _scmoe_lora_enabled = getattr(model_args, "scattermoe_lora", False)
+    if _scmoe_lora_enabled:
+        from loft.kernels.scattermoe.custom_lora import (
+            attach_scattermoe_lora,
+            freeze_everything_except_scmoe_lora_and_peft,
+        )
+        _rank = model_args.scmoe_lora_rank if model_args.scmoe_lora_rank is not None else (model_args.lora_r or 16)
+        _alpha = model_args.scmoe_lora_alpha if model_args.scmoe_lora_alpha is not None else float(model_args.lora_alpha or _rank)
+        _rslora = model_args.scmoe_lora_use_rslora if model_args.scmoe_lora_use_rslora is not None else bool(model_args.use_rslora)
+        _lora_dtype = torch.bfloat16 if (model_dtype in (None, "bfloat16", "auto") and torch.cuda.is_bf16_supported()) else torch.float16
+        logger.info(
+            f"Attaching scattermoe LoRA: rank={_rank} alpha={_alpha} rslora={_rslora} dtype={_lora_dtype}"
+        )
+        attach_scattermoe_lora(
+            model,
+            rank=_rank,
+            alpha=_alpha,
+            use_rslora=_rslora,
+            dtype=_lora_dtype,
+        )
+        # Re-freeze everything except the two LoRA sets. ``prepare_model_for_kbit_training``
+        # froze base params; ``get_peft_model`` unfroze the PEFT adapter;
+        # ``attach_scattermoe_lora`` created new trainable params. This call makes
+        # the final set explicit.
+        n_trainable = freeze_everything_except_scmoe_lora_and_peft(model)
+        logger.info(f"scmoe_lora attached; {n_trainable} param tensors trainable")
+        # Required for gradient checkpointing when base params are frozen —
+        # without this, backward can't propagate through the frozen base
+        # back to the new LoRA adapters.
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+
     # Apply chunked MLP for memory-efficient long-context training
     _chunked_mlp = getattr(model_args, "chunked_mlp", False) or getattr(training_args, "chunked_mlp", False)
     if _chunked_mlp:
@@ -527,17 +773,52 @@ def main(script_args, training_args, model_args):
     ################
     # Training
     ################
-    trainer = DPOTrainer(
-        model=model,
-        ref_model=None,  # With PEFT, base model (adapters disabled) is the reference
-        args=training_args,
-        train_dataset=dataset,
-        eval_dataset=eval_dataset,
-        processing_class=tokenizer,
-    )
+    # TRL's DPOTrainer auto-detects "vision models" via membership in
+    # MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES and switches tokenize_row →
+    # process_row, which expects a multimodal Processor with a .tokenizer
+    # attribute and an ``images`` column on the dataset. For text-only DPO on
+    # Gemma4 (a composite VL model whose top-level ``model_type == "gemma4"``
+    # is in that mapping) we need to opt out. Temporarily override the
+    # reported model_type with the text sub-config's ``gemma4_text`` across
+    # the DPOTrainer.__init__ so the tokenizer path is picked. Restore after.
+    _orig_model_type = getattr(model.config, "model_type", None)
+    _tc_model_type = getattr(getattr(model.config, "text_config", None), "model_type", None)
+    _model_type_overridden = False
+    try:
+        from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
+
+        if _orig_model_type in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES and _tc_model_type:
+            model.config.model_type = _tc_model_type
+            _model_type_overridden = True
+            logger.info(
+                f"Temporarily overriding model.config.model_type "
+                f"{_orig_model_type!r} → {_tc_model_type!r} for DPOTrainer init "
+                f"(text-only DPO path on composite VL model)"
+            )
+    except Exception:  # pragma: no cover
+        pass
+
+    try:
+        trainer = DPOTrainer(
+            model=model,
+            ref_model=None,  # With PEFT, base model (adapters disabled) is the reference
+            args=training_args,
+            train_dataset=dataset,
+            eval_dataset=eval_dataset,
+            processing_class=tokenizer,
+        )
+    finally:
+        if _model_type_overridden:
+            model.config.model_type = _orig_model_type
 
     # Apply Triton RL kernels for faster entropy/log_softmax
     _patch_triton_rl_kernels(trainer)
+
+    # scmoe_lora: disable during reference forward (composes with PEFT
+    # disable_adapter) + drop a sidecar at every checkpoint save.
+    if _scmoe_lora_enabled:
+        _patch_scmoe_lora_null_ref_context(trainer, model)
+        _install_scmoe_lora_checkpoint_callback(trainer, model)
 
     # Mask think block tokens from DPO loss if requested
     _mask_thinking = getattr(training_args, "mask_thinking", False) or getattr(model_args, "mask_thinking", False)
@@ -565,11 +846,33 @@ def main(script_args, training_args, model_args):
         trainer.training_step = _offloaded_training_step
         logger.info("Activation offloading enabled for DPO training")
 
-    trainer.train()
+    # Resume: load scmoe_lora sidecar from checkpoint (HF Trainer handles the
+    # PEFT adapter + optimizer + scheduler + rng, but doesn't know about our
+    # sidecar). Call BEFORE trainer.train() so the restored scmoe_lora state
+    # participates in both policy and (disabled) reference forwards from step 1.
+    _resume_from = getattr(training_args, "resume_from_checkpoint", None)
+    if _scmoe_lora_enabled and _resume_from:
+        from loft.kernels.scattermoe.custom_lora import load_scmoe_lora
+        _sidecar = os.path.join(_resume_from, "scmoe_lora.safetensors")
+        if os.path.exists(_sidecar):
+            n = load_scmoe_lora(model, _sidecar)
+            logger.info(f"Resume: loaded {n} scmoe_lora tensors from {_sidecar}")
+        else:
+            logger.warning(
+                f"Resume: no scmoe_lora sidecar at {_sidecar} — experts will "
+                f"resume from init, which is wrong for any checkpoint past step 0!"
+            )
+
+    trainer.train(resume_from_checkpoint=_resume_from)
 
     # Save the final model
     trainer.save_model(training_args.output_dir)
     logger.info(f"Model saved to {training_args.output_dir}")
+
+    # scmoe_lora final sidecar (HF Trainer.save_model only persists the
+    # PEFT adapter; the plain-parameter scmoe_lora is invisible to it).
+    if _scmoe_lora_enabled:
+        _save_scmoe_lora_sidecar(trainer, model, training_args.output_dir)
 
 
 if __name__ == "__main__":

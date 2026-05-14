@@ -443,6 +443,20 @@ class SFTConfig(TrainingArguments):
             )
         },
     )
+    full_mask_reasoning: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Fully mask all reasoning/thinking blocks in assistant turns. "
+                "Supports both <think>...</think> (Qwen-style) and "
+                "<|channel>thought\\n...\\n<channel|> (Gemma 4-style) formats.\n"
+                "Unlike auto_mask_reasoning (which trains on thinking content), "
+                "this masks the ENTIRE block including content. Use when the model "
+                "already knows how to think and you only want to train on the response.\n"
+                "Requires assistant_only_loss or completion_only_loss to be enabled."
+            )
+        },
+    )
     activation_offloading: bool = field(
         default=False,
         metadata={

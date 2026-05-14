@@ -162,18 +162,29 @@ def selective_dequant_nf4_triton(
 
     grid = (num_active, triton.cdiv(expert_numel, BLOCK_SIZE))
 
-    _selective_dequant_nf4_kernel[grid](
-        packed_flat,
-        absmax_flat,
-        active_experts,
-        codebook,
-        out,
-        out.stride(0),
-        num_active=num_active,
-        packed_per_expert=packed_per_expert,
-        blocks_per_expert=blocks_per_expert,
-        blocksize=blocksize,
-        BLOCK_SIZE=BLOCK_SIZE,
-    )
+    # Triton kernels launch on `torch.cuda.current_device()`, NOT on the
+    # tensor's device. On multi-GPU model parallel, the tensors here may be on
+    # a different device than the current one — align them so the kernel
+    # launches on the correct GPU.
+    _prev_dev = torch.cuda.current_device()
+    if packed_data.device.type == "cuda" and packed_data.device.index != _prev_dev:
+        torch.cuda.set_device(packed_data.device)
+    try:
+            _selective_dequant_nf4_kernel[grid](
+            packed_flat,
+            absmax_flat,
+            active_experts,
+            codebook,
+            out,
+            out.stride(0),
+            num_active=num_active,
+            packed_per_expert=packed_per_expert,
+            blocks_per_expert=blocks_per_expert,
+            blocksize=blocksize,
+            BLOCK_SIZE=BLOCK_SIZE,
+        )
+    finally:
+        if packed_data.device.type == "cuda" and packed_data.device.index != _prev_dev:
+            torch.cuda.set_device(_prev_dev)
 
     return out.reshape(num_active, *expert_shape)

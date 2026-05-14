@@ -17,7 +17,33 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate import logging
 
+from loft.kernels.fused_linear_logprobs import fused_linear_logprobs
+
 logger = logging.get_logger(__name__)
+
+
+def _get_final_logit_softcapping(model) -> float | None:
+    """Return the model's final_logit_softcapping value if set, else None.
+
+    Gemma4 uses 30.0. Composite VL configs (Gemma4ForConditionalGeneration)
+    nest it under ``config.text_config``. Most other decoders have it flat on
+    ``config`` (or not at all).
+    """
+    m = model
+    while hasattr(m, "module"):
+        m = m.module
+    if hasattr(m, "base_model"):
+        m = m.base_model.model if hasattr(m.base_model, "model") else m.base_model
+    cfg = getattr(m, "config", None)
+    if cfg is None:
+        return None
+    for holder in (cfg, getattr(cfg, "text_config", None)):
+        if holder is None:
+            continue
+        cap = getattr(holder, "final_logit_softcapping", None)
+        if cap is not None:
+            return float(cap)
+    return None
 
 
 class ChunkedPerTokenLogProbs(torch.autograd.Function):
@@ -193,12 +219,17 @@ def patch_dpo_chunked_logprobs(chunk_size=4096):
 
     logger.info(f"Patching DPOTrainer.concatenated_forward for vocab-chunked log probs (chunk_size={chunk_size})")
 
-    def _chunked_concatenated_forward(self, model, batch):
+    def _chunked_concatenated_forward(self, model, batch, is_ref_model=False):
         """concatenated_forward with vocab-chunked log prob computation.
 
         Based on TRL's DPOTrainer.concatenated_forward but replaces the lm_head
         forward + cross_entropy log prob computation with a chunked version that
         never materializes [batch, seq, vocab_size].
+
+        ``is_ref_model`` is accepted for TRL ≥ 0.18 which forwards it through
+        from ``compute_ref_log_probs``; we don't need to branch on it here
+        because the reference forward is already wrapped in
+        ``null_ref_context()`` (PEFT + scmoe_lora disabled) by the caller.
         """
         num_examples = batch["prompt_input_ids"].shape[0]
         concatenated_batch = self.concatenated_inputs(batch, padding_value=self.padding_value)
@@ -265,11 +296,31 @@ def patch_dpo_chunked_logprobs(chunk_size=4096):
             seq_len = labels.shape[1]
             hidden_states = hidden_states[:, -seq_len:]
 
-        # ── Chunked log prob computation ──
-        labels[~loss_mask] = 0  # dummy token for masked positions
-        per_token_logps, gathered_logits = chunked_per_token_logps(
-            hidden_states, lm_head_weight, labels, chunk_size=chunk_size, ignore_index=0,
+        # ── Fused lm_head + log_softmax + gather ──
+        # Use the fused kernel: it streams vocab chunks (no [N, V] materialize),
+        # applies softcap inline, and skips the [V, H] grad_W accumulator when
+        # lm_head is frozen (5x memory reduction at Gemma4 262K-vocab scale).
+        softcap = _get_final_logit_softcapping(model)
+        N_flat, H_dim = hidden_states.shape[0] * hidden_states.shape[1], hidden_states.shape[2]
+        # Mark ignored positions with -100 (fused kernel's sentinel)
+        flat_labels = labels.clone().reshape(-1)
+        flat_labels[~loss_mask.reshape(-1)] = -100
+        # Move labels to lm_head's device (model_parallel)
+        lm_device = lm_head_weight.device
+        flat_hidden = hidden_states.reshape(N_flat, H_dim).to(lm_device)
+        flat_labels = flat_labels.to(lm_device)
+
+        flat_lps, flat_label_logit = fused_linear_logprobs(
+            flat_hidden,
+            lm_head_weight,
+            flat_labels,
+            softcap=softcap,
+            chunk_size=chunk_size,
+            ignore_index=-100,
+            return_label_logit=True,
         )
+        per_token_logps = flat_lps.reshape(labels.shape).to(loss_mask.device)
+        gathered_logits = flat_label_logit.reshape(labels.shape).to(loss_mask.device)
 
         # Move to same device if needed (model_parallel)
         if per_token_logps.device != loss_mask.device:

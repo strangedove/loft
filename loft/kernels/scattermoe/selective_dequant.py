@@ -112,10 +112,15 @@ def _selective_dequant_bnb4(
         return full.reshape(E_total, *expert_shape)[active_experts]
 
     # Use fused Triton kernel for NF4 (handles selective gather + dequant in one pass)
-    if quant_state.quant_type == "nf4" and raw_param.dtype == torch.uint8:
-        from axolotl.integrations.kernels.libs.scattermoe_lora.selective_dequant_kernel import (
-            selective_dequant_nf4_triton,
-        )
+    # Set LOFT_DISABLE_SELECTIVE_NF4_TRITON=1 to force the slower fallback path
+    # (useful when debugging device issues).
+    import os as _os
+    if (
+        quant_state.quant_type == "nf4"
+        and raw_param.dtype == torch.uint8
+        and not _os.environ.get("LOFT_DISABLE_SELECTIVE_NF4_TRITON")
+    ):
+        from .selective_dequant_kernel import selective_dequant_nf4_triton
 
         # Handle nested (double) quantization: dequantize absmax first
         # BnB uses dequantize_blockwise (not _4bit) for nested absmax + offset

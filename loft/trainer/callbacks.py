@@ -15,7 +15,7 @@
 import logging
 import os
 from collections.abc import Callable
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import pandas as pd
 import torch
@@ -38,7 +38,10 @@ from transformers.utils import is_rich_available
 from ..data_utils import maybe_apply_chat_template
 from ..import_utils import is_mergekit_available, is_weave_available
 from ..models.utils import unwrap_model_for_generation
-from .judges import BasePairwiseJudge
+# BasePairwiseJudge module path doesn't exist in this fork; lazy-import only when
+# the pairwise judge callback is actually used. SFT path doesn't touch it.
+if TYPE_CHECKING:
+    from trl.trainer.judges import BasePairwiseJudge
 from .utils import log_table_to_comet_experiment
 
 
@@ -271,7 +274,7 @@ class WinRateCallback(TrainerCallback):
 
     def __init__(
         self,
-        judge: BasePairwiseJudge,
+        judge: "BasePairwiseJudge",
         trainer: Trainer,
         generation_config: Optional[GenerationConfig] = None,
         num_prompts: Optional[int] = None,

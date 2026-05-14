@@ -403,36 +403,73 @@ def _groupXtY(
         dy_blk_ptrs = (
             DY_ptr + M_idxs[:, None] * stride_dym + N_block[None, :] * stride_dyk
         )
-        if (Db_ptr is not None) and (K_block_id == 0):
-            _xty_and_bias(
-                E_idx,
-                start_idx,
-                end_idx,
-                M_block,
-                K_block,
-                K_mask,
-                N_block,
-                N_mask,
-                dy_blk_ptrs,
-                stride_dym,
-                xt_blk_ptrs,
-                stride_xm,
-                DW_ptr,
-                stride_dwe,
-                stride_dwk,
-                stride_dwn,
-                Db_ptr,
-                stride_dbe,
-                stride_dbn,
-                BLOCK_M,
-                BLOCK_N,
-                BLOCK_K,
-                ACC_TYPE,
-                allow_tf32,
-                NO_K_MASK,
-                NO_N_MASK,
-                compute_bias=True,
-            )
+        # Nested conditional: outer `Db_ptr is not None` is a Python/trace-time
+        # check — when Db_ptr is None, Triton skips IR generation for the
+        # compute_bias=True branch entirely. The original flat
+        # `(Db_ptr is not None) and (K_block_id == 0)` mixed trace and runtime,
+        # forcing Triton to compile both branches and fail on `None.dtype` in
+        # `_xty_and_bias` when no bias is present.
+        if Db_ptr is not None:
+            if K_block_id == 0:
+                _xty_and_bias(
+                    E_idx,
+                    start_idx,
+                    end_idx,
+                    M_block,
+                    K_block,
+                    K_mask,
+                    N_block,
+                    N_mask,
+                    dy_blk_ptrs,
+                    stride_dym,
+                    xt_blk_ptrs,
+                    stride_xm,
+                    DW_ptr,
+                    stride_dwe,
+                    stride_dwk,
+                    stride_dwn,
+                    Db_ptr,
+                    stride_dbe,
+                    stride_dbn,
+                    BLOCK_M,
+                    BLOCK_N,
+                    BLOCK_K,
+                    ACC_TYPE,
+                    allow_tf32,
+                    NO_K_MASK,
+                    NO_N_MASK,
+                    compute_bias=True,
+                )
+            else:
+                _xty_and_bias(
+                    E_idx,
+                    start_idx,
+                    end_idx,
+                    M_block,
+                    K_block,
+                    K_mask,
+                    N_block,
+                    N_mask,
+                    dy_blk_ptrs,
+                    stride_dym,
+                    xt_blk_ptrs,
+                    stride_xm,
+                    DW_ptr,
+                    stride_dwe,
+                    stride_dwk,
+                    stride_dwn,
+                    Db_ptr,
+                    stride_dbe,
+                    stride_dbn,
+                    BLOCK_M,
+                    BLOCK_N,
+                    BLOCK_K,
+                    ACC_TYPE,
+                    allow_tf32,
+                    NO_K_MASK,
+                    NO_N_MASK,
+                    compute_bias=False,
+                )
         else:
             _xty_and_bias(
                 E_idx,

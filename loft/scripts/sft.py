@@ -267,12 +267,442 @@ def main(script_args, training_args, model_args, dataset_args):
                 f"(config._experts_implementation=scattermoe)"
             )
 
-    if config.architectures and any(arch in valid_image_text_architectures for arch in config.architectures):
+    _vl_arch = config.architectures and any(arch in valid_image_text_architectures for arch in config.architectures)
+
+    # Gemma 4 has two head_dims: sliding layers use head_dim=256 (FA2-OK),
+    # global "full_attention" layers use head_dim=512 (FA2 max=256 → rejected).
+    # When FA2 is requested, force SDPA on the global layers only so the bulk
+    # of layers (sliding) still get FA2's memory savings + sliding_window.
+    if (model_args.attn_implementation == "flash_attention_2"
+            and getattr(config, "model_type", "") == "gemma4"):
+        from transformers.models.gemma4 import modeling_gemma4 as _g4mm
+        _orig_g4_attn_fwd = _g4mm.Gemma4TextAttention.forward
+
+        from torch.nn.attention import sdpa_kernel, SDPBackend
+        def _attn_fwd_with_sdpa_for_global(self, *args, **kwargs):
+            if getattr(self, "head_dim", 0) > 256:
+                _saved = self.config._attn_implementation
+                self.config._attn_implementation = "sdpa"
+                try:
+                    # Prefer memory-efficient + cudnn backends (both are
+                    # O(L) memory). Math backend allocates O(L²) score
+                    # matrix — 4.24 GiB at 8k × head_dim=512 — and OOMs.
+                    with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION,
+                                      SDPBackend.CUDNN_ATTENTION,
+                                      SDPBackend.MATH]):
+                        return _orig_g4_attn_fwd(self, *args, **kwargs)
+                finally:
+                    self.config._attn_implementation = _saved
+            return _orig_g4_attn_fwd(self, *args, **kwargs)
+
+        _g4mm.Gemma4TextAttention.forward = _attn_fwd_with_sdpa_for_global
+        logger.info(
+            "Patched Gemma4TextAttention.forward: global layers (head_dim=512) "
+            "fall back to SDPA; sliding layers (head_dim=256) keep FA2."
+        )
+
+    # flex_attention path: HF's `flex_attention_mask` unconditionally adds a
+    # padding_mask sub-mask doing `padding_mask[batch_idx, kv_idx]`. That fancy
+    # `aten.index.Tensor` op cannot be lowered inside a flex_attention mask
+    # subgraph on torch 2.6 (SubgraphLoweringException: "Buffers cannot be
+    # created while lowering a pointwise subgraph"), and on multi-GPU model_parallel
+    # the padding_mask tensor lives on a different device than the per-layer attn
+    # compute. With per_device_train_batch_size=1 there is no padding within a
+    # batch, so we can drop the padding_mask entirely when attention_mask is all-1s.
+    if model_args.attn_implementation == "flex_attention":
+        from transformers import masking_utils as _mu
+        _orig_flex_mask = _mu.flex_attention_mask
+        def _flex_mask_skip_padding_if_unneeded(*args, **kwargs):
+            am = kwargs.get("attention_mask", None)
+            if am is None and len(args) >= 7:
+                am = args[6]
+            if am is not None:
+                try:
+                    if bool(am.all()):
+                        if "attention_mask" in kwargs:
+                            kwargs["attention_mask"] = None
+                        else:
+                            args = list(args); args[6] = None; args = tuple(args)
+                except Exception:
+                    pass
+            return _orig_flex_mask(*args, **kwargs)
+        _mu.flex_attention_mask = _flex_mask_skip_padding_if_unneeded
+        # Re-register through the AttentionMaskInterface global mapping too so
+        # any code that reads the dispatch dict picks up the patched function.
+        try:
+            _mu.AttentionMaskInterface._global_mapping["flex_attention"] = (
+                _flex_mask_skip_padding_if_unneeded
+            )
+        except Exception:
+            pass
+        logger.info(
+            "Patched flex_attention_mask: skip padding_mask submask when "
+            "attention_mask is all-1s (avoids torch 2.6 SubgraphLoweringException "
+            "on aten.index.Tensor and cross-device closures under model_parallel)."
+        )
+
+        # On RTX 3090 (SM 8.6, ~100KB shared memory per SM), torch 2.6's default
+        # flex_attention configs blow past SMEM (head_dim<=256: BLOCK_M=128,
+        # BLOCK_N=64, num_stages=3 -> ~196KB). Plus torch 2.6 has a skip for
+        # num_stages==2 (pytorch issue #129625), leaving num_stages=1 or 3.
+        # Patch _get_default_config_{fwd,bwd} to return SMEM-safe configs with
+        # num_stages=1 for sm_86. SMEM ~ num_stages * BLOCK_N * head_dim * 2bytes * 2
+        # head_dim=256, BLOCK_N=64, num_stages=1 -> ~75KB
+        # head_dim=512, BLOCK_N=32, num_stages=1 -> ~75KB
+        # Also: num_stages/num_warps are passed both as kwargs AND splatted from
+        # kernel_options in inductor's autotune loop, so they MUST NOT be in
+        # the user-supplied kernel_options dict — only BLOCK_M/BLOCK_N (which
+        # use setdefault and so override the autotuner default if set).
+        try:
+            cap = torch.cuda.get_device_capability(0)
+        except Exception:
+            cap = (0, 0)
+        if cap == (8, 6):  # RTX 3090 / 3080 / A40 etc — limited SMEM
+            from torch._inductor.kernel import flex_attention as _t_flex
+            def _safe_fwd_config(query):
+                head_dim = query.get_size()[-1]
+                if query.get_dtype() == torch.float32:
+                    return (16, 16, 4, 1)
+                if head_dim <= 256:
+                    return (64, 64, 4, 1)
+                return (32, 32, 4, 1)  # head_dim > 256 (Gemma4 global)
+            def _safe_bwd_config(query):
+                head_dim = query.get_size()[-1]
+                if query.get_dtype() == torch.float32:
+                    return (16, 16, 4, 1)
+                if head_dim <= 256:
+                    return (32, 32, 4, 1)
+                return (16, 16, 4, 1)
+            _t_flex._get_default_config_fwd = _safe_fwd_config
+            _t_flex._get_default_config_bwd = _safe_bwd_config
+            logger.info(
+                "Patched torch._inductor flex_attention default configs for SM 8.6 "
+                "(RTX 3090): fwd (64,64,4,1) head_dim<=256 / (32,32,4,1) head_dim>256; "
+                "bwd (32,32,4,1) head_dim<=256 / (16,16,4,1) head_dim>256. "
+                "num_stages=1 fits in 100KB SMEM."
+            )
+
+            # HF transformers/integrations/flex_attention.py force-compiles flex
+            # with mode="max-autotune-no-cudagraphs" on torch 2.6.0 + training
+            # (line 86-89, workaround for pytorch#146260). That adds 5 alternate
+            # configs per layer, all of which exceed our SMEM and add tons of
+            # wasted compile time. Override WrappedFlexAttention to use the
+            # plain compile path; with our num_stages=1 default config we
+            # don't need the workaround.
+            from transformers.integrations import flex_attention as _hf_flex_int
+            from torch.nn.attention.flex_attention import flex_attention as _raw_flex_attn
+            # Bump dynamo cache_size_limit. Gemma 4 has 2 KV-head variants
+            # (sliding: kv=16, global: kv=4), so even with dynamic shapes flex
+            # recompiles per variant; with sliding_window vs global mask shapes
+            # and fwd/bwd, we easily exceed the default cache=8 limit. After
+            # cache exhaustion dynamo falls back to eager math_attention which
+            # materializes O(L²) scores -> OOM at our seq lengths.
+            # 2026-04-30: bumped from 256 to allow longer single-shape-per-sample
+            # runs without cache exhaustion. With dynamic=False each unique seq_len
+            # × {sliding,global} × {fwd,bwd} consumes 4 entries; 1000 unique seqs
+            # = 4000 entries. Default of 256 fills around step 32 on 250-sample
+            # runs and falls back to math_attention -> OOM.
+            _flex_cache_limit = int(os.environ.get("LOFT_FLEX_CACHE_LIMIT", "8192"))
+            torch._dynamo.config.cache_size_limit = _flex_cache_limit
+            torch._dynamo.config.accumulated_cache_size_limit = max(_flex_cache_limit * 4, 1024)
+            # 2026-04-30: env-var override for dynamic= flag. dynamic=True collapses
+            # all seq_len variants into a single compile (huge win), but the
+            # 2026-04-29 mixed marvin+instruct data triggered a sympy guard.
+            # Pure-marvin runs don't have that mix, so dynamic=True is safe and
+            # is the proper fix to cache exhaustion. Set LOFT_FLEX_DYNAMIC=1 to
+            # opt in; default kept at False to preserve mixed-data behavior.
+            _flex_dynamic_env = os.environ.get("LOFT_FLEX_DYNAMIC", "").strip().lower()
+            _flex_dynamic = _flex_dynamic_env in ("1", "true", "yes", "on")
+            _orig_init = _hf_flex_int.WrappedFlexAttention.__init__
+            @torch.compiler.disable(recursive=False)
+            def _patched_init(self, training):
+                if not getattr(self, "_is_flex_compiled", False) or training != getattr(self, "training", None):
+                    self.training = training
+                    self._compiled_flex_attention = torch.compile(_raw_flex_attn, dynamic=_flex_dynamic)
+                    self._is_flex_compiled = True
+            _hf_flex_int.WrappedFlexAttention.__init__ = _patched_init
+            _hf_flex_int.WrappedFlexAttention._instance = None
+            _hf_flex_int.WrappedFlexAttention._is_flex_compiled = False
+            logger.info(
+                "Patched HF WrappedFlexAttention: skip torch 2.6 max-autotune "
+                "workaround, use dynamic=%s. Bumped dynamo cache_size_limit=%d.",
+                _flex_dynamic, _flex_cache_limit,
+            )
+
+    if _vl_arch:
         from transformers import AutoModelForImageTextToText
 
         model = AutoModelForImageTextToText.from_pretrained(model_args.model_name_or_path, **model_kwargs)
     else:
         model = AutoModelForCausalLM.from_pretrained(model_args.model_name_or_path, **model_kwargs)
+
+    # Text-only training on a multimodal-config model (e.g. Gemma 4 31B-it):
+    # bypass the multimodal wrapper's forward so we never enter the image_mask
+    # / audio_mask code path. Under model_parallel that path triggers a
+    # device-mismatch (input_ids on cuda:1 while embed_tokens lives on cuda:0)
+    # since `self.get_input_embeddings()(llm_input_ids)` runs ahead of the
+    # accelerate hook on the embedding module. Free vision/audio submodules
+    # too — they're loaded on GPU but we'll never use them.
+    if _vl_arch and hasattr(model, "model") and hasattr(model.model, "language_model"):
+        import types
+        from dataclasses import dataclass
+        from typing import Optional, Tuple
+        from transformers.cache_utils import Cache
+
+        _inner = model.model
+        _lang = _inner.language_model
+
+        # Free unused multimodal submodules.
+        for _attr in ("vision_tower", "audio_tower", "embed_vision", "embed_audio", "multi_modal_projector"):
+            if hasattr(_inner, _attr) and getattr(_inner, _attr) is not None:
+                setattr(_inner, _attr, None)
+        import torch as _torch
+        _torch.cuda.empty_cache()
+
+        # Wrapper that exposes the multimodal model's expected output shape so
+        # CCE's gemma4 patch (which reads outputs.image_hidden_states /
+        # audio_hidden_states / past_key_values / hidden_states / attentions)
+        # doesn't AttributeError on a vanilla BaseModelOutputWithPast.
+        class _TextOnlyMMOutput:
+            __slots__ = ("last_hidden_state", "past_key_values", "hidden_states",
+                         "attentions", "image_hidden_states", "audio_hidden_states")
+
+            def __init__(self, base):
+                self.last_hidden_state = base.last_hidden_state
+                self.past_key_values = getattr(base, "past_key_values", None)
+                self.hidden_states = getattr(base, "hidden_states", None)
+                self.attentions = getattr(base, "attentions", None)
+                self.image_hidden_states = None
+                self.audio_hidden_states = None
+
+        _DROP_KWARGS = {
+            "pixel_values", "pixel_values_videos", "input_features",
+            "input_features_mask", "image_position_ids", "video_position_ids",
+            "mm_token_type_ids", "labels",
+        }
+
+        def _text_only_inner_forward(self, input_ids=None, attention_mask=None,
+                                      position_ids=None, past_key_values=None,
+                                      inputs_embeds=None, use_cache=None, **kwargs):
+            kwargs = {k: v for k, v in kwargs.items() if k not in _DROP_KWARGS}
+            # Force input_ids onto the actual embed_tokens.weight device.
+            # accelerate's per-module hook moves args to the device the
+            # device_map thinks the module is on, but for VL composite
+            # configs the weight can end up elsewhere — verify against the
+            # storage tensor itself, not the hook's belief.
+            _embed_dev = _lang.embed_tokens.weight.device
+            if input_ids is not None and input_ids.device != _embed_dev:
+                input_ids = input_ids.to(_embed_dev)
+            if attention_mask is not None and attention_mask.device != _embed_dev:
+                attention_mask = attention_mask.to(_embed_dev)
+            if position_ids is not None and position_ids.device != _embed_dev:
+                position_ids = position_ids.to(_embed_dev)
+            base = _lang(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                **kwargs,
+            )
+            return _TextOnlyMMOutput(base)
+
+        model.model.forward = types.MethodType(_text_only_inner_forward, model.model)
+        logger.info(
+            "Bypassed multimodal Gemma4Model.forward — routing directly to "
+            "language_model. Vision/audio submodules freed."
+        )
+
+    # Optional: swap to Gemma4ForCausalLM container so the model is text-only at
+    # the architecture level (no multimodal wrapper, no _TextOnlyMMOutput shim,
+    # simpler `model.layers.X` paths instead of `model.language_model.layers.X`).
+    # The swap moves loaded module references — bnb-4bit weights and accelerate
+    # device hooks travel with the modules; only the top-level wrapper changes.
+    if (
+        getattr(model_args, "force_text_only_causal_lm", False)
+        and _vl_arch
+        and hasattr(model, "model")
+        and hasattr(model.model, "language_model")
+    ):
+        from transformers import Gemma4ForCausalLM, Gemma4TextConfig
+        import torch as _torch
+
+        # Resolve text_config (Gemma4TextConfig). Already on the multimodal config.
+        _text_cfg = getattr(config, "text_config", None)
+        if _text_cfg is None or not isinstance(_text_cfg, Gemma4TextConfig):
+            logger.warning(
+                "force_text_only_causal_lm set but config has no text_config "
+                "(or wrong type) — leaving model as Gemma4ForConditionalGeneration."
+            )
+        else:
+            # Save references to the loaded text-only modules and the top-level
+            # accelerate hook for re-installation on the new container.
+            _orig_inner_lang = model.model.language_model
+            _orig_lm_head = model.lm_head
+            _orig_top_hook = getattr(model, "_hf_hook", None)
+
+            # Build a Gemma4ForCausalLM shell on meta to avoid CPU param allocation
+            # (we'll replace its empty modules with the real ones).
+            from accelerate import init_empty_weights as _init_empty_weights
+            with _init_empty_weights():
+                _new_model = Gemma4ForCausalLM(_text_cfg)
+
+            # Carry over name_or_path so SFTTrainer's AutoTokenizer/AutoProcessor
+            # auto-load can find the original checkpoint dir/repo.
+            _src_path = getattr(model.config, "_name_or_path", None) or getattr(model_args, "model_name_or_path", None)
+            if _src_path:
+                _new_model.config._name_or_path = _src_path
+                if hasattr(_new_model, "name_or_path"):
+                    _new_model.name_or_path = _src_path
+
+            # Move the loaded modules into the new container. These are real
+            # bnb-4bit-quantized modules with their own device hooks already attached.
+            _new_model.model = _orig_inner_lang
+            _new_model.lm_head = _orig_lm_head
+
+            # Re-attach the top-level accelerate hook (controls io_same_device
+            # behavior). Without this, accelerate's add_hook_to_module would
+            # need to be re-run — instead we just steal the hook from the old
+            # top-level model.
+            if _orig_top_hook is not None:
+                _new_model._hf_hook = _orig_top_hook
+
+            # Free the original wrapper (its empty model.vision_tower etc. were
+            # already None'd above; only the wrapper container remains).
+            del model
+            _torch.cuda.empty_cache()
+
+            model = _new_model
+            # Stop the multimodal codepath from being detected by downstream code.
+            _vl_arch = False
+            logger.info(
+                "Swapped Gemma4ForConditionalGeneration -> Gemma4ForCausalLM "
+                "(force_text_only_causal_lm=True). Module references preserved; "
+                "bnb-4bit + accelerate hooks travel with the modules."
+            )
+
+            # Register a CCE patch function for `gemma4_text` model_type so that
+            # cce_patch(model) succeeds when training_args.use_cce is True.
+            # The Gemma4ForCausalLM forward signature matches Gemma3ForCausalLM's
+            # text-only `cce_forward` (input_ids/attention_mask/position_ids/...
+            # — no pixel_values), so we reuse that implementation directly.
+            try:
+                import cut_cross_entropy.transformers.patch as _cce_patch_mod
+                import cut_cross_entropy.transformers.gemma3 as _g3_cce
+                from cut_cross_entropy.transformers.gemma3 import cce_forward as _g3_cce_forward
+                from types import MethodType as _MethodType
+
+                def _patch_gemma4_text(maybe_model, patch_options, remote_model_id=None):
+                    # Mirror gemma3.patch_gemma3_text: install gemma3's cce_forward
+                    # (which has the matching text-only signature) as the model's
+                    # forward and stash patch options on the gemma3 module's
+                    # _PATCH_OPTS global (cce_forward reads from there).
+                    _g3_cce._PATCH_OPTS = patch_options
+                    if remote_model_id is None and hasattr(maybe_model, "forward"):
+                        maybe_model.forward = _MethodType(_g3_cce_forward, maybe_model)
+                        return maybe_model
+                    return None
+
+                _cce_patch_mod.PATCH_FNS["gemma4_text"] = _patch_gemma4_text
+                logger.info(
+                    "Registered CCE patch for `gemma4_text` (reusing gemma3 cce_forward)."
+                )
+            except ImportError:
+                logger.info(
+                    "cut_cross_entropy not importable — skipping gemma4_text "
+                    "CCE registration. (use_cce path will fail if enabled.)"
+                )
+
+            # Device alignment: under model_parallel, the trainer's input_ids /
+            # attention_mask / position_ids can arrive on a different GPU than
+            # embed_tokens.weight. Wrap Gemma4TextModel.forward so it re-aligns
+            # to the embed weight device on every call, regardless of what the
+            # outer cce_forward or accelerate hook chain did. This mirrors the
+            # `_text_only_inner_forward` fix that the multimodal wrapper used.
+            from types import MethodType as _MethodType2
+            _orig_text_model_fwd = type(model.model).forward
+
+            def _aligned_text_model_forward(self, input_ids=None,
+                                            attention_mask=None,
+                                            position_ids=None,
+                                            **kwargs):
+                _embed_dev = self.embed_tokens.weight.device
+                if input_ids is not None and input_ids.device != _embed_dev:
+                    input_ids = input_ids.to(_embed_dev)
+                if attention_mask is not None and attention_mask.device != _embed_dev:
+                    attention_mask = attention_mask.to(_embed_dev)
+                if position_ids is not None and position_ids.device != _embed_dev:
+                    position_ids = position_ids.to(_embed_dev)
+                return _orig_text_model_fwd(
+                    self,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    **kwargs,
+                )
+
+            model.model.forward = _MethodType2(_aligned_text_model_forward, model.model)
+            logger.info(
+                "Wrapped Gemma4TextModel.forward with device alignment for "
+                "model_parallel."
+            )
+
+            # Force-align all submodule hooks' execution_device to match their
+            # actual weight device. The post-swap module references retained
+            # hooks from the original Gemma4ForConditionalGeneration context,
+            # where execution_device was set for the wrapping container — those
+            # values may not match the new (raw) module weight device anymore.
+            # Without this fix, accelerate's pre_forward moves input_ids to the
+            # WRONG device just before it hits embed_tokens. Also align
+            # io_same_device on the top-level hook.
+            from accelerate.hooks import remove_hook_from_module as _remove_hook
+            _fixed_hooks = 0
+            _removed_hooks = 0
+            for _n, _m in model.named_modules():
+                _p = next(_m.parameters(recurse=False), None)
+                if _p is None or _p.device.type != "cuda":
+                    continue
+                _hook = getattr(_m, "_hf_hook", None)
+                if _hook is None:
+                    continue
+                _hook.execution_device = _p.device.index
+                _fixed_hooks += 1
+                # io_same_device on inner hooks would move output back to input
+                # device — disable so logits stay on lm_head's GPU.
+                if hasattr(_hook, "io_same_device"):
+                    _hook.io_same_device = False
+
+            # Print embed_tokens device info to confirm alignment.
+            _et = model.model.embed_tokens
+            _et_hook = getattr(_et, "_hf_hook", None)
+            logger.info(
+                f"embed_tokens.weight on {_et.weight.device} | "
+                f"hook.execution_device={getattr(_et_hook, 'execution_device', None) if _et_hook else 'none'} | "
+                f"aligned {_fixed_hooks} hooks total."
+            )
+
+            # Auto-rewrite lora_target_modules regex to drop the `language_model.`
+            # prefix that the multimodal layout required. The user's regex now
+            # needs to match `model.layers.X` instead of `language_model.layers.X`.
+            _ltm = getattr(model_args, "lora_target_modules", None)
+            if isinstance(_ltm, str) and "language_model" in _ltm:
+                _new_ltm = _ltm.replace("language_model\\.", "").replace("language_model.", "")
+                model_args.lora_target_modules = _new_ltm
+                logger.info(
+                    f"Auto-rewrote lora_target_modules: '{_ltm}' -> '{_new_ltm}'"
+                )
+            elif isinstance(_ltm, (list, tuple)):
+                _new_ltm = [
+                    s.replace("language_model\\.", "").replace("language_model.", "")
+                    if isinstance(s, str) else s
+                    for s in _ltm
+                ]
+                if _new_ltm != list(_ltm):
+                    model_args.lora_target_modules = _new_ltm
+                    logger.info(
+                        f"Auto-rewrote lora_target_modules: {_ltm} -> {_new_ltm}"
+                    )
 
     # When using model_parallel with device_map, accelerate's dispatch_model
     # installs hooks that move the model's output back to the input device
@@ -284,6 +714,52 @@ def main(script_args, training_args, model_args, dataset_args):
     if model_args.model_parallel and hasattr(model, "_hf_hook"):
         model._hf_hook.io_same_device = False
         logger.info("Disabled io_same_device on model dispatch hook — logits stay on lm_head device")
+
+    # Sync per-module hook execution_device + non-persistent buffers to actual
+    # weight device. When a device_map target GPU runs out of room mid-load,
+    # accelerate places the weight on a different device but (a) leaves the
+    # hook's execution_device pointing at the original target, and (b) leaves
+    # non-persistent buffers (e.g. Gemma4TextScaledWordEmbedding.embed_scale)
+    # on the original target since they're allocated at module init from
+    # config rather than loaded from the checkpoint. The hook then moves
+    # inputs to the wrong GPU and arithmetic against the misplaced buffer
+    # errors with "tensors on different devices". Walk the module tree and
+    # re-align both.
+    if model_args.model_parallel:
+        import torch as _torch
+        _aligned_hooks = 0
+        _moved_buffers = 0
+        for _name, _module in model.named_modules():
+            # Determine the module's "actual" device from its first parameter.
+            _primary_param = None
+            for _p in _module.parameters(recurse=False):
+                _primary_param = _p
+                break
+            if _primary_param is None or _primary_param.device.type != "cuda":
+                continue
+            _actual_dev = _primary_param.device
+
+            # Move any buffers that drifted off the param device.
+            for _bname, _buf in _module.named_buffers(recurse=False):
+                if _buf.device != _actual_dev:
+                    _module._buffers[_bname] = _buf.to(_actual_dev)
+                    _moved_buffers += 1
+
+            # Re-align hook execution_device.
+            _hook = getattr(_module, "_hf_hook", None)
+            if _hook is not None:
+                _expected = getattr(_hook, "execution_device", None)
+                _expected_idx = (
+                    _expected.index if hasattr(_expected, "index") and _expected.index is not None else _expected
+                )
+                if _expected_idx is not None and _expected_idx != _actual_dev.index:
+                    _hook.execution_device = _actual_dev.index
+                    _aligned_hooks += 1
+        if _aligned_hooks or _moved_buffers:
+            logger.info(
+                f"Post-load device sync: re-aligned {_aligned_hooks} hooks, "
+                f"moved {_moved_buffers} drifted buffers to match param device"
+            )
 
     # Apply CCE (Cut Cross-Entropy) patching for memory-efficient loss computation
     if training_args.use_cce:
@@ -585,6 +1061,31 @@ def main(script_args, training_args, model_args, dataset_args):
     )
     eval_dataset = dataset[script_args.dataset_test_split] if has_eval_split and wants_eval else None
 
+    # For multimodal-config models (e.g. Gemma 4 31B-it = Gemma4ForConditionalGeneration)
+    # AutoProcessor returns a multimodal Processor in SFTTrainer's __init__, which sets
+    # _is_vlm=True and triggers a hard error against assistant_only_loss. When the dataset
+    # is text-only / pre-tokenized, force the tokenizer-only path by pre-loading AutoTokenizer
+    # and passing it explicitly as processing_class.
+    _processing_class = None
+    _is_pretokenized = getattr(training_args, "_pretokenized", False)
+    _has_vision_config = "ForConditionalGeneration" in type(model).__name__
+    # When force_text_only_causal_lm swapped the wrapper, the model class is no
+    # longer ForConditionalGeneration but the underlying checkpoint dir still
+    # has multimodal Processor configs. Without an explicit AutoTokenizer pass-in,
+    # SFTTrainer's auto-init loads the multimodal Processor and refuses
+    # assistant_only_loss. Force the tokenizer-only path here too.
+    _forced_text_only = getattr(model_args, "force_text_only_causal_lm", False)
+    if (_is_pretokenized and _has_vision_config) or _forced_text_only:
+        from transformers import AutoTokenizer
+        _trust_remote_code = getattr(model.config, "auto_map", None) is not None
+        _processing_class = AutoTokenizer.from_pretrained(
+            model_args.model_name_or_path, trust_remote_code=_trust_remote_code
+        )
+        logger.info(
+            "Forcing AutoTokenizer as processing_class to bypass multimodal "
+            "Processor / VLM detection (text-only training)."
+        )
+
     # Initialize the SFT trainer
     trainer = SFTTrainer(
         model=model,
@@ -592,7 +1093,20 @@ def main(script_args, training_args, model_args, dataset_args):
         train_dataset=dataset[script_args.dataset_train_split],
         eval_dataset=eval_dataset,
         peft_config=get_peft_config(model_args),
+        **({"processing_class": _processing_class} if _processing_class is not None else {}),
     )
+
+    # Optionally compile each decoder layer individually with torch.compile.
+    # Per-layer compile fuses intermediate buffers in attention forward/backward
+    # without conflicting with CCE's outer forward wrapper.  Particularly useful
+    # for Gemma4 where SDPA on global head_dim=512 layers allocates large
+    # intermediate buffers that fragmentation makes hard to fit at high step
+    # counts. Gated by env var since first-step compile cost is non-trivial.
+    # Applied AFTER trainer init so LoRA target_modules regex matches first.
+    # NOTE: LOFT_COMPILE_LAYERS env var was attempted (per-layer torch.compile)
+    # but breaks accelerate's unwrap_model + PEFT interaction.
+    # Full-model torch_compile=True via TrainingArguments breaks CCE's forward
+    # patch (NoneType hidden_states). Both paths abandoned for now.
 
     # Train the model — resume from checkpoint if available and requested
     resume_ckpt = getattr(training_args, "resume_from_checkpoint", None)

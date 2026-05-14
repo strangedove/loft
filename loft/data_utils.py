@@ -1926,6 +1926,93 @@ def apply_reasoning_mask(
     return mask
 
 
+def apply_full_reasoning_mask(
+    mask: list[int],
+    input_ids: list[int],
+    tokenizer,
+) -> list[int]:
+    """Fully mask all reasoning/thinking blocks in assistant turns.
+
+    Unlike :func:`apply_reasoning_mask` (which trains on thinking content),
+    this masks the ENTIRE block — opening tag, content, and closing tag.
+    Supports both formats:
+
+    * ``<think>...</think>`` (Qwen-style)
+    * ``<|channel>thought\\n...\\n<channel|>`` (Gemma 4-style)
+
+    Use when the model already produces good reasoning and you only want
+    to train on the response that follows.
+
+    Args:
+        mask: Existing assistant mask (1 = trainable, 0 = masked).
+        input_ids: Token IDs for the full sequence.
+        tokenizer: The tokenizer, used to encode marker strings.
+
+    Returns:
+        Modified mask with all reasoning blocks fully masked.
+    """
+    def _encode(text: str) -> list[int]:
+        return tokenizer.encode(text, add_special_tokens=False)
+
+    def _find_subseq(haystack, needle, start=0):
+        nlen = len(needle)
+        for i in range(start, len(haystack) - nlen + 1):
+            if haystack[i : i + nlen] == needle:
+                return i
+        return -1
+
+    mask = list(mask)
+    n = len(input_ids)
+
+    # --- Qwen-style: <think>...\n</think> ---
+    think_open_ids = _encode("<think>\n")
+    think_close_ids = _encode("</think>")
+
+    pos = 0
+    while pos < n:
+        idx = _find_subseq(input_ids, think_open_ids, pos)
+        if idx == -1:
+            break
+        if mask[idx] == 0:
+            pos = idx + 1
+            continue
+        close_idx = _find_subseq(input_ids, think_close_ids, idx + len(think_open_ids))
+        if close_idx != -1:
+            block_end = close_idx + len(think_close_ids)
+        else:
+            block_end = n  # unclosed — mask to end
+        for j in range(idx, min(block_end, n)):
+            mask[j] = 0
+        pos = block_end
+
+    # --- Gemma 4-style: <|channel>thought\n...\n<channel|> ---
+    # Special tokens: <|channel>=100, thought=45518, \n=107, <channel|>=101
+    channel_open_ids = _encode("<|channel>thought\n")
+    channel_close_ids = _encode("<channel|>")
+
+    if channel_open_ids and channel_close_ids:
+        pos = 0
+        while pos < n:
+            idx = _find_subseq(input_ids, channel_open_ids, pos)
+            if idx == -1:
+                break
+            if mask[idx] == 0:
+                pos = idx + 1
+                continue
+            close_idx = _find_subseq(
+                input_ids, channel_close_ids, idx + len(channel_open_ids)
+            )
+            if close_idx != -1:
+                block_end = close_idx + len(channel_close_ids)
+            else:
+                block_end = n
+            for j in range(idx, min(block_end, n)):
+                mask[j] = 0
+            pos = block_end
+
+    return mask
+
+
 def remove_trailing_eos(input_ids: list[int], eos_token_id: int) -> list[int]:
     """Remove trailing EOS token(s) from *input_ids*."""
     while input_ids and input_ids[-1] == eos_token_id:

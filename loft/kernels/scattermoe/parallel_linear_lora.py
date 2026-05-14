@@ -135,6 +135,14 @@ class ScatterMoELoRA(torch.autograd.Function):
                 gates,
                 output_expanded,
             ) = ctx.saved_tensors
+            # Upstream may hand us grad in fp32 (e.g. accelerate's
+            # convert_to_fp32 on DPO loss). The kernel matmuls + Triton paths
+            # downstream expect the grad to match the saved activation dtype.
+            # Fall back to x's dtype when output_expanded wasn't saved (the
+            # non-gated path does not keep it).
+            _ref_dtype = output_expanded.dtype if output_expanded is not None else x.dtype
+            if grad_out.dtype != _ref_dtype:
+                grad_out = grad_out.to(_ref_dtype)
             expert_weights = ctx.expert_weights
 
             k = ctx.k

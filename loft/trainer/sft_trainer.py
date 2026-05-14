@@ -16,6 +16,36 @@ import contextlib
 import math
 import os
 from collections import defaultdict
+
+
+# ── EOS-exempt aux loss controls ────────────────────────────────────────────
+# Set AUX_LOSS_EXEMPT_EOS=1 to exclude EOS-labelled positions from the
+# top-prob aux sum (model stays confident at natural stop points instead of
+# being flattened into runaway-generation territory), and to skip EOS
+# appearances in the repetition penalty window (multi-turn data legitimately
+# has EOS multiple times). AUX_LOSS_EXEMPT_EXTRA_IDS is a comma-separated
+# list of additional token ids to exempt (e.g. end-of-turn markers).
+# Ported from gemma4_moe_train_attn_mlp.py 2026-04-26 — toasty's request
+# after aux@0.1 was found to break EOS emission in generation.
+AUX_LOSS_EXEMPT_EOS = os.environ.get("AUX_LOSS_EXEMPT_EOS", "0") == "1"
+AUX_LOSS_EXEMPT_EXTRA_IDS = os.environ.get("AUX_LOSS_EXEMPT_EXTRA_IDS", "")
+
+
+def _resolve_aux_exempt_ids(eos_token_id):
+    """Resolve env-driven aux exempt token ids; returns list[int] or None."""
+    if not AUX_LOSS_EXEMPT_EOS:
+        return None
+    ids = []
+    if eos_token_id is not None:
+        ids.append(int(eos_token_id))
+    if AUX_LOSS_EXEMPT_EXTRA_IDS:
+        for tok_id in AUX_LOSS_EXEMPT_EXTRA_IDS.split(","):
+            tok_id = tok_id.strip()
+            if tok_id:
+                ids.append(int(tok_id))
+    seen = set()
+    return [i for i in ids if not (i in seen or seen.add(i))]
+
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,6 +77,7 @@ from ..data_utils import (
     add_system_message_to_example,
     apply_chat_template,
     apply_truncation_strategy_to_example,
+    apply_full_reasoning_mask,
     apply_reasoning_mask,
     compute_assistant_mask_from_messages,
     convert_binary_preference_to_sft,
@@ -666,7 +697,7 @@ def aux_eos_calibration_loss(logits, labels, assistant_masks, eos_token_id):
     return loss
 
 
-def aux_repetition_penalty_loss(logits, labels, window_size=64, ngram=1):
+def aux_repetition_penalty_loss(logits, labels, window_size=64, ngram=1, exempt_ids=None):
     """
     Repetition penalty auxiliary loss with n-gram support.
 
@@ -684,6 +715,11 @@ def aux_repetition_penalty_loss(logits, labels, window_size=64, ngram=1):
         labels: Shifted labels, shape (batch, seq_len), -100 for masked positions
         window_size: How many previous tokens to consider as "recent"
         ngram: Size of n-grams to penalize (1=unigram, 2=bigram, 3=trigram, etc.)
+        exempt_ids: Optional list[int] of token ids; when provided, penalty is NOT
+            applied for offsets where the historical (recently-seen) token is in
+            this set. Important for multi-turn data where EOS / end-of-turn legitimately
+            appears multiple times within the rep window — without exemption, the loss
+            would penalize the model for ever ending another turn.
 
     Returns:
         Scalar loss (mean probability mass on repeated n-gram continuations).
@@ -704,6 +740,12 @@ def aux_repetition_penalty_loss(logits, labels, window_size=64, ngram=1):
     clean_labels = shift_labels.clone()
     clean_labels[~loss_mask] = 0
 
+    # Pre-compute is_exempt mask per position (label is in exempt set)
+    is_exempt = None
+    if exempt_ids:
+        exempt_t = torch.tensor(exempt_ids, device=logits.device, dtype=clean_labels.dtype)
+        is_exempt = (clean_labels.unsqueeze(-1) == exempt_t.view(1, 1, -1)).any(dim=-1)
+
     rep_prob = torch.zeros(batch_size, seq_len, device=logits.device)
     win = min(window_size, seq_len - 1)
 
@@ -714,6 +756,12 @@ def aux_repetition_penalty_loss(logits, labels, window_size=64, ngram=1):
             prev_valid = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=logits.device)
             prev_tok[:, offset:] = clean_labels[:, :seq_len - offset]
             prev_valid[:, offset:] = loss_mask[:, :seq_len - offset]
+
+            # Skip offset positions where the historical token is exempt (e.g. EOS)
+            if is_exempt is not None:
+                prev_exempt = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=logits.device)
+                prev_exempt[:, offset:] = is_exempt[:, :seq_len - offset]
+                prev_valid = prev_valid & ~prev_exempt
 
             gathered = torch.gather(probs, dim=-1, index=prev_tok.unsqueeze(-1)).squeeze(-1)
             rep_prob += gathered * prev_valid.float()
@@ -749,6 +797,13 @@ def aux_repetition_penalty_loss(logits, labels, window_size=64, ngram=1):
 
             # Only penalize where prefix matches and positions are valid
             valid = cont_valid & prefix_match
+
+            # Skip pairs where the historical continuation token is exempt (EOS)
+            if is_exempt is not None:
+                cont_exempt = torch.zeros(batch_size, seq_len, dtype=torch.bool, device=logits.device)
+                cont_exempt[:, offset:] = is_exempt[:, cont_offset:seq_len - ngram + 1]
+                valid = valid & ~cont_exempt
+
             gathered = torch.gather(probs, dim=-1, index=cont_tok.unsqueeze(-1)).squeeze(-1)
             rep_prob += gathered * valid.float()
 
@@ -761,7 +816,7 @@ def aux_repetition_penalty_loss(logits, labels, window_size=64, ngram=1):
 
 
 
-def aux_top_prob_penalty_loss(logits, labels, _chunk_size: int = 512):
+def aux_top_prob_penalty_loss(logits, labels, _chunk_size: int = 512, exempt_ids=None):
     """
     Top-probability confidence penalty auxiliary loss.
 
@@ -778,6 +833,10 @@ def aux_top_prob_penalty_loss(logits, labels, _chunk_size: int = 512):
     Args:
         logits: Model logits, shape (batch, seq_len, vocab_size)
         labels: Shifted labels, shape (batch, seq_len), -100 for masked positions
+        exempt_ids: Optional list[int] of token ids; when provided, positions whose
+            label is in this set are excluded from the aux sum. Prevents the aux from
+            flattening confidence at EOS / end-of-turn markers (which would suppress
+            EOS emission under temperature sampling and produce runaway outputs).
 
     Returns:
         Scalar loss (mean top probability at trainable positions), always in [1/V, 1.0].
@@ -786,7 +845,16 @@ def aux_top_prob_penalty_loss(logits, labels, _chunk_size: int = 512):
     shift_labels = labels[..., 1:].to(logits.device)
     loss_mask = shift_labels != -100
 
-    if not loss_mask.any():
+    # Build exempt mask if requested: positions where label is in exempt_ids
+    # are removed from the aux sum (but CE loss is unaffected).
+    if exempt_ids:
+        exempt_t = torch.tensor(exempt_ids, device=logits.device, dtype=shift_labels.dtype)
+        is_exempt = (shift_labels.unsqueeze(-1) == exempt_t.view(1, 1, -1)).any(dim=-1)
+        eligible_mask = loss_mask & ~is_exempt
+    else:
+        eligible_mask = loss_mask
+
+    if not eligible_mask.any():
         return torch.tensor(0.0, device=logits.device, requires_grad=True)
 
     # Chunked computation: process _chunk_size tokens at a time to keep
@@ -797,14 +865,14 @@ def aux_top_prob_penalty_loss(logits, labels, _chunk_size: int = 512):
     for start in range(0, seq_len, _chunk_size):
         end = min(start + _chunk_size, seq_len)
         chunk = logits[:, start:end, :].float()  # fp32; backward casts grad to bf16
-        chunk_mask = loss_mask[:, start:end]
+        chunk_mask = eligible_mask[:, start:end]
         # top_prob = exp(max_logit - logsumexp) avoids full softmax materialization
         max_logit = chunk.max(dim=-1).values
         log_partition = torch.logsumexp(chunk, dim=-1)
         top_prob = torch.exp(max_logit - log_partition)
         weighted_sum = weighted_sum + (top_prob * chunk_mask.float()).sum()
 
-    loss = weighted_sum / loss_mask.sum()
+    loss = weighted_sum / eligible_mask.sum()
     return loss
 
 
@@ -814,7 +882,7 @@ _VOCAB_CHUNK_SIZE = 8192  # vocab tokens per chunk for memory-efficient top-prob
 
 def _vocab_chunked_tp_eos_loss(
     h_ck, w, m_ck, te_ck, eos_token_id, tp_w, eos_w, n_trainable, n_turn_ends,
-    vocab_chunk_size=_VOCAB_CHUNK_SIZE,
+    vocab_chunk_size=_VOCAB_CHUNK_SIZE, exempt_mask=None,
 ):
     """Compute top-prob and EOS aux losses without materializing full (seq, V) logits.
 
@@ -843,6 +911,8 @@ def _vocab_chunked_tp_eos_loss(
     m_ck = m_ck.to(dev)
     if te_ck is not None:
         te_ck = te_ck.to(dev)
+    if exempt_mask is not None:
+        exempt_mask = exempt_mask.to(dev)
 
     # Streaming logsumexp over vocabulary chunks
     running_max = torch.full((h_ck.shape[0],), -1e10, device=dev, dtype=torch.float32)
@@ -869,7 +939,8 @@ def _vocab_chunked_tp_eos_loss(
     # Top-probability penalty
     if tp_w > 0:
         top_prob = torch.exp(running_max - logsumexp)
-        loss = loss + tp_w * (top_prob * m_ck.float()).sum() / N_dev
+        tp_mask = m_ck if exempt_mask is None else (m_ck & ~exempt_mask)
+        loss = loss + tp_w * (top_prob * tp_mask.float()).sum() / N_dev
 
     # EOS calibration at turn-end positions
     if eos_w > 0 and te_ck is not None and te_ck.any():
@@ -1126,6 +1197,18 @@ class SFTTrainer(BaseTrainer):
                 )
         else:
             added_tokens = []
+
+        # Patch Gemma 4 chat template to render reasoning_content without tool_calls gate
+        if getattr(args, "full_mask_reasoning", False):
+            tpl = getattr(processing_class, "chat_template", None) or ""
+            _old = "thinking_text and loop.index0 > ns_turn.last_user_idx and message.get('tool_calls')"
+            _new = "thinking_text and loop.index0 > ns_turn.last_user_idx"
+            if _old in tpl:
+                processing_class.chat_template = tpl.replace(_old, _new)
+                logger.info(
+                    "full_mask_reasoning: patched chat template to render reasoning_content "
+                    "without tool_calls gate (Gemma 4 fix)"
+                )
 
         # Catch some wrong configurations related to VLMs
         if self._is_vlm and args.packing:
@@ -1723,6 +1806,8 @@ class SFTTrainer(BaseTrainer):
         if tw_vec is not None:
             tw_vec = tw_vec.to(hidden_states.device)
         eos_token_id = self.processing_class.eos_token_id if eos_w > 0 else 0
+        # EOS-exempt for top-prob and rep aux losses (env-driven, see top of file)
+        exempt_ids = _resolve_aux_exempt_ids(self.processing_class.eos_token_id)
 
         # Shift hidden states and labels (same shift as standard loss computation)
         shift_h = hidden_states[..., :-1, :].contiguous()
@@ -1741,6 +1826,13 @@ class SFTTrainer(BaseTrainer):
         # Clean labels for repetition loss lookback (replace -100 with 0)
         flat_cl = flat_l.clone()
         flat_cl[~flat_m] = 0
+
+        # Pre-compute "is_exempt" per position from clean_labels (matches the
+        # historical-token side of the rep penalty AND the label side of top-prob).
+        flat_is_exempt = None
+        if exempt_ids:
+            exempt_t = torch.tensor(exempt_ids, device=flat_cl.device, dtype=flat_cl.dtype)
+            flat_is_exempt = (flat_cl.unsqueeze(-1) == exempt_t.view(1, -1)).any(dim=-1)
 
         # Pre-compute turn-end mask for EOS loss
         flat_te = None
@@ -1761,6 +1853,7 @@ class SFTTrainer(BaseTrainer):
             return self._compute_vocab_chunked_aux_path(
                 flat_h, flat_l, flat_m, flat_te, lm_head_weight,
                 tp_w, eos_w, eos_token_id, N_trainable, n_turn_ends, mode,
+                flat_is_exempt=flat_is_exempt,
             )
 
         chunk_size = _LIGER_AUX_CHUNK_SIZE
@@ -1778,6 +1871,11 @@ class SFTTrainer(BaseTrainer):
             if te_ck is not None:
                 te_ck = te_ck.to(dev)
             N_dev = N.to(dev)  # closure-captured N may be on a different GPU
+            clen = h_ck.shape[0]
+            # Slice the precomputed exempt mask for this chunk (label-side exemption)
+            chunk_exempt = None
+            if flat_is_exempt is not None:
+                chunk_exempt = flat_is_exempt[start_idx:start_idx + clen].to(dev)
             loss = torch.tensor(0.0, device=dev)
             n_valid = m_ck.sum()
             if n_valid == 0:
@@ -1798,7 +1896,8 @@ class SFTTrainer(BaseTrainer):
             if tp_w > 0:
                 probs = torch.softmax(logits, dim=-1)
                 top_p = probs.max(dim=-1).values
-                loss = loss + tp_w * (top_p * m_ck.float()).sum() / N_dev
+                tp_mask = m_ck if chunk_exempt is None else (m_ck & ~chunk_exempt)
+                loss = loss + tp_w * (top_p * tp_mask.float()).sum() / N_dev
 
             # EOS calibration
             if eos_w > 0 and te_ck is not None and te_ck.any():
@@ -1810,11 +1909,16 @@ class SFTTrainer(BaseTrainer):
 
             # Repetition penalty (needs cross-chunk label context)
             if rep_w > 0:
+                # Under model_parallel, flat_cl/flat_m/flat_is_exempt may live on a
+                # different GPU than logits/h_ck. Align once per chunk (.to(dev) is
+                # a no-op when already on dev).
+                flat_cl_d = flat_cl.to(dev)
+                flat_m_d = flat_m.to(dev)
+                flat_is_exempt_d = flat_is_exempt.to(dev) if flat_is_exempt is not None else None
                 probs = torch.softmax(logits, dim=-1)
-                clen = h_ck.shape[0]
-                rep_prob = torch.zeros(clen, device=h_ck.device)
+                rep_prob = torch.zeros(clen, device=dev)
                 win = min(rep_window, clen + start_idx - 1)
-                pos = torch.arange(clen, device=h_ck.device) + start_idx
+                pos = torch.arange(clen, device=dev) + start_idx
 
                 if rep_ngram <= 1:
                     # Unigram: penalize any recently-seen token
@@ -1822,8 +1926,12 @@ class SFTTrainer(BaseTrainer):
                         gi = pos - off
                         valid = gi >= 0
                         gi = gi.clamp(min=0)
-                        prev_tok = flat_cl[gi]
-                        prev_valid = valid & flat_m[gi] & m_ck
+                        prev_tok = flat_cl_d[gi]
+                        prev_valid = valid & flat_m_d[gi] & m_ck
+                        if flat_is_exempt_d is not None:
+                            # Don't penalize predicting an exempt token (e.g. EOS)
+                            # just because it appeared in the lookback window.
+                            prev_valid = prev_valid & ~flat_is_exempt_d[gi]
                         gathered = torch.gather(
                             probs, dim=-1, index=prev_tok.unsqueeze(-1)
                         ).squeeze(-1)
@@ -1836,11 +1944,14 @@ class SFTTrainer(BaseTrainer):
                         cont_gi = pos - (off - rep_ngram + 1)
                         cont_valid = (cont_gi >= 0)
                         cont_gi = cont_gi.clamp(min=0)
-                        cont_tok = flat_cl[cont_gi]
-                        cont_pos_valid = cont_valid & flat_m[cont_gi] & m_ck
+                        cont_tok = flat_cl_d[cont_gi]
+                        cont_pos_valid = cont_valid & flat_m_d[cont_gi] & m_ck
+                        if flat_is_exempt_d is not None:
+                            # Skip if the would-be-penalized continuation token is exempt
+                            cont_pos_valid = cont_pos_valid & ~flat_is_exempt_d[cont_gi]
 
                         # Check (n-1) prefix tokens match between current and historical
-                        prefix_match = torch.ones(clen, dtype=torch.bool, device=h_ck.device)
+                        prefix_match = torch.ones(clen, dtype=torch.bool, device=dev)
                         for k in range(1, rep_ngram):
                             # Current prefix: k positions back from current
                             cur_gi = pos - k
@@ -1850,7 +1961,7 @@ class SFTTrainer(BaseTrainer):
                             hist_gi = pos - (off - rep_ngram + 1 + k)
                             hist_ok = hist_gi >= 0
                             hist_gi = hist_gi.clamp(min=0)
-                            prefix_match = prefix_match & cur_ok & hist_ok & (flat_cl[cur_gi] == flat_cl[hist_gi])
+                            prefix_match = prefix_match & cur_ok & hist_ok & (flat_cl_d[cur_gi] == flat_cl_d[hist_gi])
 
                         valid = cont_pos_valid & prefix_match
                         gathered = torch.gather(
@@ -1942,19 +2053,25 @@ class SFTTrainer(BaseTrainer):
                         ).item()
 
                 if rep_w > 0:
+                    # Under model_parallel, flat_cl/flat_m may live on a different
+                    # GPU than logits/h. Align once per chunk (.to is a no-op when
+                    # already on dev). See project_loft_rep_penalty_mp_fix.md.
+                    dev_h = h.device
+                    flat_cl_d = flat_cl.to(dev_h)
+                    flat_m_d = flat_m.to(dev_h)
                     probs = torch.softmax(logits, dim=-1)
                     clen = h.shape[0]
-                    rep_prob = torch.zeros(clen, device=h.device)
+                    rep_prob = torch.zeros(clen, device=dev_h)
                     win = min(rep_window, clen + start - 1)
-                    pos = torch.arange(clen, device=h.device) + start
+                    pos = torch.arange(clen, device=dev_h) + start
 
                     if rep_ngram <= 1:
                         for off in range(1, win + 1):
                             gi = pos - off
                             valid = gi >= 0
                             gi = gi.clamp(min=0)
-                            prev_tok = flat_cl[gi]
-                            prev_valid = valid & flat_m[gi] & m
+                            prev_tok = flat_cl_d[gi]
+                            prev_valid = valid & flat_m_d[gi] & m
                             gathered = torch.gather(
                                 probs, dim=-1, index=prev_tok.unsqueeze(-1)
                             ).squeeze(-1)
@@ -1965,10 +2082,10 @@ class SFTTrainer(BaseTrainer):
                             cont_gi = pos - (off - rep_ngram + 1)
                             cont_valid = (cont_gi >= 0)
                             cont_gi = cont_gi.clamp(min=0)
-                            cont_tok = flat_cl[cont_gi]
-                            cont_pos_valid = cont_valid & flat_m[cont_gi] & m
+                            cont_tok = flat_cl_d[cont_gi]
+                            cont_pos_valid = cont_valid & flat_m_d[cont_gi] & m
 
-                            prefix_match = torch.ones(clen, dtype=torch.bool, device=h.device)
+                            prefix_match = torch.ones(clen, dtype=torch.bool, device=dev_h)
                             for k in range(1, rep_ngram):
                                 cur_gi = pos - k
                                 cur_ok = cur_gi >= 0
@@ -1976,7 +2093,7 @@ class SFTTrainer(BaseTrainer):
                                 hist_gi = pos - (off - rep_ngram + 1 + k)
                                 hist_ok = hist_gi >= 0
                                 hist_gi = hist_gi.clamp(min=0)
-                                prefix_match = prefix_match & cur_ok & hist_ok & (flat_cl[cur_gi] == flat_cl[hist_gi])
+                                prefix_match = prefix_match & cur_ok & hist_ok & (flat_cl_d[cur_gi] == flat_cl_d[hist_gi])
 
                             valid = cont_pos_valid & prefix_match
                             gathered = torch.gather(
@@ -2021,6 +2138,7 @@ class SFTTrainer(BaseTrainer):
     def _compute_vocab_chunked_aux_path(
         self, flat_h, flat_l, flat_m, flat_te, lm_head_weight,
         tp_w, eos_w, eos_token_id, N_trainable, n_turn_ends, mode,
+        flat_is_exempt=None,
     ):
         """Compute top-prob and/or EOS aux losses + metrics using vocab-chunked projection.
 
@@ -2042,11 +2160,13 @@ class SFTTrainer(BaseTrainer):
             h = flat_h[start:end]
             m = flat_m[start:end]
             te = flat_te[start:end] if flat_te is not None else None
+            ex = flat_is_exempt[start:end] if flat_is_exempt is not None else None
 
             cl = torch.utils.checkpoint.checkpoint(
                 _vocab_chunked_tp_eos_loss,
                 h, lm_head_weight, m, te,
                 eos_token_id, tp_w, eos_w, N, n_turn_ends,
+                _VOCAB_CHUNK_SIZE, ex,
                 use_reentrant=False,
             )
             total_loss = total_loss + cl
@@ -2119,10 +2239,15 @@ class SFTTrainer(BaseTrainer):
                 # Accuracy
                 correct_tokens += ((running_argmax == l) & m).sum().item()
 
-                # Top-prob metric
+                # Top-prob metric (mirror the loss-side EOS exemption for consistency)
                 if tp_w > 0:
                     top_prob = torch.exp(running_max - logsumexp)
-                    metric_tp += (top_prob * m.float()).sum().item()
+                    if flat_is_exempt is not None:
+                        ex_m = flat_is_exempt[start:end].to(dev)
+                        tp_m = m & ~ex_m
+                    else:
+                        tp_m = m
+                    metric_tp += (top_prob * tp_m.float()).sum().item()
 
                 # EOS metric
                 if eos_w > 0 and flat_te is not None:
@@ -2540,6 +2665,14 @@ class SFTTrainer(BaseTrainer):
                             processing_class,
                         )
 
+                    # Apply full_mask_reasoning: mask entire thinking blocks
+                    if getattr(args, "full_mask_reasoning", False) and "assistant_masks" in output:
+                        output["assistant_masks"] = apply_full_reasoning_mask(
+                            output["assistant_masks"],
+                            output["input_ids"],
+                            processing_class,
+                        )
+
                     # Apply train_on_incomplete_assistant: remove trailing EOS if last role is assistant
                     if train_on_incomplete_assistant and last_role_is_assistant and eos_token_id is not None:
                         output["input_ids"] = remove_trailing_eos(output["input_ids"], eos_token_id)
@@ -2764,10 +2897,14 @@ class SFTTrainer(BaseTrainer):
                         self.accelerator.gather_for_metrics(eos_loss.detach()).mean().item()
                     )
 
+                # Resolve EOS-exempt token ids once for both top-prob and rep aux
+                exempt_ids = _resolve_aux_exempt_ids(self.processing_class.eos_token_id)
+
                 # Repetition penalty
                 if (self.args.aux_loss_rep_weight or 0) > 0:
                     rep_loss = aux_repetition_penalty_loss(
-                        logits, labels, self.args.aux_loss_rep_window, self.args.aux_loss_rep_ngram
+                        logits, labels, self.args.aux_loss_rep_window,
+                        self.args.aux_loss_rep_ngram, exempt_ids=exempt_ids,
                     )
                     loss = loss + self.args.aux_loss_rep_weight * rep_loss
                     self._metrics[mode]["aux_loss_rep"].append(
@@ -2776,7 +2913,9 @@ class SFTTrainer(BaseTrainer):
 
                 # Top-probability penalty
                 if (self.args.aux_loss_top_prob_weight or 0) > 0:
-                    top_prob_loss = aux_top_prob_penalty_loss(logits, labels)
+                    top_prob_loss = aux_top_prob_penalty_loss(
+                        logits, labels, exempt_ids=exempt_ids,
+                    )
                     loss = loss + self.args.aux_loss_top_prob_weight * top_prob_loss
                     self._metrics[mode]["aux_loss_top_prob"].append(
                         self.accelerator.gather_for_metrics(top_prob_loss.detach()).mean().item()
@@ -2901,7 +3040,15 @@ class SFTTrainer(BaseTrainer):
     # Override training step to add activation offloading context.
     def training_step(self, *args, **kwargs):
         with self.maybe_activation_offload_context:
-            return super().training_step(*args, **kwargs)
+            result = super().training_step(*args, **kwargs)
+        # Release unused cached GPU memory after each step to prevent
+        # fragmentation-induced OOMs on long runs.  Gated by env var
+        # since the extra CUDA malloc overhead (~1-5ms) is pointless
+        # when memory is not tight.
+        if os.environ.get("LOFT_EMPTY_CACHE_EVERY_STEP"):
+            import torch
+            torch.cuda.empty_cache()
+        return result
 
     def log(self, logs: dict[str, float], start_time: Optional[float] = None) -> None:
         mode = "train" if self.model.training else "eval"

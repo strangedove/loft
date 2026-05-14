@@ -210,15 +210,21 @@ if HAS_TRITON:
             output = torch.empty(N, K_BLOCK, device=logits.device, dtype=torch.float32)
             logsumexp = torch.empty(N, device=logits.device, dtype=torch.float32)
 
-            for start in range(0, N, MAX_GRID):
-                end = min(start + MAX_GRID, N)
-                chunk_n = end - start
-                _selective_logsoftmax_fwd_kernel[(chunk_n,)](
-                    logits[start:end], index[start:end], output[start:end],
-                    logsumexp[start:end],
-                    logits.stride(0), index.stride(0), output.stride(0),
-                    actual_K=K, K_BLOCK=K_BLOCK, V=V, BLOCK_V=BLOCK_V,
-                )
+            # Triton picks up torch.cuda.current_device() when launching; with
+            # model-parallel pipelines the "current" device may point at cuda:1
+            # (the last layer's GPU) while our logits live on cuda:0 (lm_head),
+            # which surfaces as "Pointer argument cannot be accessed from Triton".
+            # Pin the launch device to the tensors' GPU for the duration.
+            with torch.cuda.device(logits.device):
+                for start in range(0, N, MAX_GRID):
+                    end = min(start + MAX_GRID, N)
+                    chunk_n = end - start
+                    _selective_logsoftmax_fwd_kernel[(chunk_n,)](
+                        logits[start:end], index[start:end], output[start:end],
+                        logsumexp[start:end],
+                        logits.stride(0), index.stride(0), output.stride(0),
+                        actual_K=K, K_BLOCK=K_BLOCK, V=V, BLOCK_V=BLOCK_V,
+                    )
 
             ctx.save_for_backward(logits, index, logsumexp)
             ctx.K = K
@@ -236,7 +242,7 @@ if HAS_TRITON:
             grad_output = grad_output.contiguous()
 
             for start in range(0, N, ctx.MAX_GRID):
-                end = min(start + N, N)
+                end = min(start + ctx.MAX_GRID, N)
                 chunk_n = end - start
                 _selective_logsoftmax_bwd_kernel[(chunk_n,)](
                     grad_output[start:end], logsumexp[start:end],
@@ -280,6 +286,13 @@ def selective_log_softmax(logits: torch.Tensor, index: torch.Tensor) -> torch.Te
     V = logits.shape[-1]
     K = index.shape[-1]
     original_index_shape = index.shape
+
+    # Model-parallel / manual-split checkpoints can hand us labels still on CPU
+    # (DPOTrainer's concatenated_batch doesn't device-place its label tensors
+    # explicitly). Triton kernels require all pointer args on the same CUDA
+    # device as the first tensor, so co-locate index with logits here.
+    if index.device != logits.device:
+        index = index.to(logits.device)
 
     flat_logits = logits.reshape(-1, V).contiguous()
     flat_index = index.reshape(-1, K).contiguous()

@@ -194,6 +194,18 @@ class ModelConfig:
             "for training overhead (logits, gradients) on the last GPU."
         },
     )
+    force_text_only_causal_lm: bool = field(
+        default=False,
+        metadata={
+            "help": "For multimodal-config models (e.g. Gemma 4 31B-it loads as "
+            "Gemma4ForConditionalGeneration), force loading the text-only CausalLM "
+            "class instead. Skips vision/audio encoder weights entirely (saves "
+            "~0.6B params on Gemma 4 31B), uses the simpler Gemma4ForCausalLM forward "
+            "path, and avoids the multimodal-output shim. Requires state-dict key "
+            "remap from `language_model.model.X` -> `model.X`. When true, "
+            "lora_target_modules regex must NOT include `language_model\\.` prefix."
+        },
+    )
     low_cpu_mem_usage: bool = field(
         default=True,
         metadata={
@@ -224,6 +236,50 @@ class ModelConfig:
     activation_offloading: bool = field(
         default=False,
         metadata={"help": "Offload activations to CPU during training. Saves ~3-4GB/GPU, ~10%% slower."},
+    )
+    # --- ScatterMoE experts implementation (MoE models: Gemma4, etc) ---
+    #
+    # When enabled, loft registers the scattermoe ExpertsInterface and sets
+    # ``config._experts_implementation = "scattermoe"`` before model load so
+    # experts dispatch through the fused scattermoe kernel. Mirrors
+    # ``SFTConfig.use_scattermoe`` so the DPO script can take the same path.
+    use_scattermoe: bool = field(
+        default=False,
+        metadata={
+            "help": "Register scattermoe ExpertsInterface and set the config's "
+            "experts implementation to scattermoe before model load. Required for "
+            "memory-efficient MoE training on Gemma4 etc."
+        },
+    )
+    # --- scattermoe-native LoRA for MoE experts (custom_lora.attach_scattermoe_lora) ---
+    #
+    # For large MoE models (Gemma4 26B-A4B) PEFT's target_parameters path
+    # OOMs because it materializes the full 3D delta weight per forward.
+    # ``scattermoe_lora`` attaches a LoRA directly consumed by the scattermoe
+    # fused LoRA kernel as plain nn.Parameters on each experts module,
+    # bypassing PEFT's ParamWrapper. When enabled in DPO, the reference
+    # forward is wrapped with ``disable_scmoe_lora`` so the base-model
+    # reference logprobs match the un-adapted experts.
+    scattermoe_lora: bool = field(
+        default=False,
+        metadata={
+            "help": "Attach scattermoe-native LoRA to MoE experts (Gemma4 etc). "
+            "Required for expert-LoRA training on large MoE models where PEFT's "
+            "target_parameters path OOMs. When on, the DPO reference forward also "
+            "disables these adapters."
+        },
+    )
+    scmoe_lora_rank: Optional[int] = field(
+        default=None,
+        metadata={"help": "Rank for scmoe_lora. Defaults to lora_r."},
+    )
+    scmoe_lora_alpha: Optional[float] = field(
+        default=None,
+        metadata={"help": "Alpha for scmoe_lora. Defaults to lora_alpha."},
+    )
+    scmoe_lora_use_rslora: Optional[bool] = field(
+        default=None,
+        metadata={"help": "rslora for scmoe_lora. Defaults to use_rslora."},
     )
     # Deprecated params
     torch_dtype: Optional[str] = field(
